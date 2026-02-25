@@ -31,6 +31,10 @@ jobs:
         run: sudo apt update && sudo apt install -y build-essential nasm cmake
         if: runner.os == 'Linux'
 
+      - name: install build dependencies (macOS)
+        run: brew install cmake nasm
+        if: runner.os == 'macOS'
+
       - name: make fastp static
         run: make static -j ${{ steps.cpu-cores.outputs.count }}
 
