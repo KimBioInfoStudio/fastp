@@ -57,6 +57,7 @@ If you use fastp in your work, you can cite fastp as:  *Shifu Chen. fastp 1.0: A
   - [deduplication](#deduplication)
 - [batch processing](#batch-processing)
 - [all options](#all-options)
+- [benchmark](#benchmark)
 - [citations](#citations)
 
 # features
@@ -523,6 +524,21 @@ options:
   # help
   -?, --help                         print this message
 ```
+
+# benchmark
+
+Performance optimizations (SIMD vectorization, heap allocation elimination, lookup tables) deliver up to **1.76x speedup** on compute-bound workloads while producing bit-identical output.
+
+| Workload | Baseline (v1.1.0) | Optimized | Speedup |
+|----------|-------------------|-----------|---------|
+| Compressed (.fq.gz) | 26.39s | 24.98s | **1.06x** |
+| Uncompressed (.fq) | 26.50s | 15.08s | **1.76x** |
+
+*10M PE150 read pairs, 4 threads, Apple M4 Pro, median of 3 runs.*
+
+With compressed input, gzip I/O dominates wall time (~95%), limiting observable gains. Uncompressed input isolates the processing pipeline where SIMD and branchless optimizations have full effect.
+
+See [docs/benchmark-2026-02-25.md](docs/benchmark-2026-02-25.md) for full methodology, per-optimization breakdown, and reproduction steps.
 
 # citations
 ### Shifu Chen. 2025. fastp 1.0: An ultra-fast all-round tool for FASTQ data quality control and preprocessing. iMeta 2025: [https://doi.org/10.1002/imt2.107](https://doi.org/10.1002/imt2.70078)
