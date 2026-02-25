@@ -23,9 +23,8 @@ If you use fastp in your work, you can cite fastp as:  *Shifu Chen. fastp 1.0: A
   - [install with Bioconda](#install-with-bioconda)
   - [or download the latest prebuilt binary for Linux users](#or-download-the-latest-prebuilt-binary-for-linux-users)
   - [or compile from source](#or-compile-from-source)
-    - [Step 1: install isa-l](#step-1-install-isa-l)
-    - [step 2: install libdeflate](#step-2-install-libdeflate)
-    - [Step 3: download and build fastp](#step-3-download-and-build-fastp)
+    - [Option A: static build](#option-a-static-build-recommended-no-system-library-dependencies)
+    - [Option B: link against system libraries](#option-b-link-against-system-libraries)
 - [input and output](#input-and-output)
   - [output to STDOUT](#output-to-stdout)
   - [input from STDIN](#input-from-stdin)
@@ -117,41 +116,41 @@ mv fastp.0.23.4 fastp
 chmod a+x ./fastp
 ```
 ## or compile from source
-`fastp` depends on `libdeflate` and `libisal`, while `libisal` is not compatible with gcc 4.8. If you use gcc 4.8, your fastp will fail to run. Please upgrade your gcc before you build the libraries and fastp.
+`fastp` depends on `isa-l` and `libdeflate`, which are included as git submodules. You can either build them from source (static mode) or link against system-installed libraries.
 
-### Step 1: install isa-l
-It's recommended that to install it using your package manager, for example `apt install isa-l` on ubuntu, or `brew install isa-l` on Mac. Otherwise you can compile it from source. Please be noted that `isa-l` is not compatible with gcc 4.8 or older versions. See https://github.com/intel/isa-l
-`autoconf`, `automake`, `libtools`, `nasm (>=2.11.01)` and `yasm (>=1.2.0)` are required to build isa-l.
+### Option A: static build (recommended, no system library dependencies)
+Build isa-l and libdeflate from submodules and link them statically. Requires `cmake` and a C/C++ compiler.
 ```shell
-git clone https://github.com/intel/isa-l.git
-cd isa-l
-./autogen.sh
-./configure --prefix=/usr --libdir=/usr/lib64
-make -j
+git clone --recursive https://github.com/OpenGene/fastp.git
+cd fastp
+make static -j
+
+# Install
 sudo make install
 ```
 
-### step 2: install libdeflate
-It's recommended that to install it using your package manager, for example `apt install libdeflate` on ubuntu, or `brew install libdeflate` on Mac. Otherwise you can compile it from source. See https://github.com/ebiggers/libdeflate
+### Option B: link against system libraries
+First install isa-l and libdeflate via your package manager:
 ```shell
-git clone https://github.com/ebiggers/libdeflate.git
-cd libdeflate
-cmake -B build
-cmake --build build
-cmake --install build
+# Ubuntu/Debian
+apt install libisal-dev libdeflate-dev
+
+# macOS
+brew install isa-l libdeflate
 ```
-
-### Step 3: download and build fastp
+Then build fastp:
 ```shell
-# get source (you can also use browser to download from master or releases)
-git clone https://github.com/OpenGene/fastp.git
-
-# build
+git clone --recursive https://github.com/OpenGene/fastp.git
 cd fastp
 make -j
 
 # Install
 sudo make install
+```
+
+If you already cloned without `--recursive`, initialize the submodules with:
+```shell
+git submodule update --init --recursive
 ```
 
 # input and output
