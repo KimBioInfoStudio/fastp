@@ -115,7 +115,18 @@ mv fastp.0.23.4 fastp
 chmod a+x ./fastp
 ```
 ## or compile from source
-`fastp` depends on `isa-l` and `libdeflate`, which are included as git submodules and built from source automatically. Requires `cmake`, `nasm`, and a C/C++ compiler.
+`fastp` depends on `isa-l` and `libdeflate`, which are included as git submodules and built from source automatically. Requires `cmake`, `nasm` (for isa-l SIMD assembly), and a C/C++ compiler.
+
+Install build dependencies:
+```shell
+# Ubuntu/Debian
+sudo apt install build-essential cmake nasm
+
+# macOS
+brew install cmake nasm
+```
+
+Then build:
 ```shell
 git clone --recursive https://github.com/OpenGene/fastp.git
 cd fastp
