@@ -31,3 +31,12 @@
 *.out
 *.app
 bin
+fastplong
+
+# Test data (generated)
+testdata/*.fastq
+testdata/*.fastq.gz
+
+# Reports
+fastplong.html
+fastplong.json
