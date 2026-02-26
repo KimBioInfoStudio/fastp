@@ -1,7 +1,7 @@
 #include "adaptertrimmer.h"
 #include "editdistance.h"
 #include <math.h>
-#include "hwy/highway.h"
+#include "simd.h"
 
 AdapterTrimmer::AdapterTrimmer(){
 }
@@ -58,10 +58,6 @@ int AdapterTrimmer::trimByMultiSequences(Read* r, FilterResult* fr, vector<strin
 
 int AdapterTrimmer::searchAdapter(string *read, const string &adapter, double edMax, int searchStart, int searchLen, bool asLeftAsPossible, bool asRightAsPossible)
 {
-    namespace hn = hwy::HWY_NAMESPACE;
-    hn::ScalableTag<uint8_t> d8;
-    const size_t N = hn::Lanes(d8);
-
     int minMismatch = 99999; // initialized with a large mismatch
     int pos = -1;
     // for the best match
@@ -86,15 +82,7 @@ int AdapterTrimmer::searchAdapter(string *read, const string &adapter, double ed
         // go from left, and return immediatedly if find a mismatch < threshold
         for (int p = searchStart; p < searchEnd - alen; p++)
         {
-            size_t mismatch = 0;
-            for (size_t i = 0; i < alen; i += N)
-            {
-                const size_t lanesToLoad = min(alen - i, N);
-                const auto rdata_v = hn::LoadN(d8, reinterpret_cast<const uint8_t *>(rdata + i + p), lanesToLoad);
-                const auto adata_v = hn::LoadN(d8, reinterpret_cast<const uint8_t *>(adata + i), lanesToLoad);
-                const auto mismatch_mask = rdata_v != adata_v;
-                mismatch += hn::CountTrue(d8, mismatch_mask);
-            }
+            int mismatch = fastplong_simd::countMismatches(rdata + p, adata, alen);
 
             if (mismatch <= threshold)
             {
@@ -112,15 +100,7 @@ int AdapterTrimmer::searchAdapter(string *read, const string &adapter, double ed
         // go from right, and return immediatedly if find a mismatch <= threshold
         for (int p = searchEnd - alen; p >= searchStart; p--)
         {
-            size_t mismatch = 0;
-            for (size_t i = 0; i < alen; i += N)
-            {
-                const size_t lanesToLoad = min(alen - i, N);
-                const auto rdata_v = hn::LoadN(d8, reinterpret_cast<const uint8_t *>(rdata + i + p), lanesToLoad);
-                const auto adata_v = hn::LoadN(d8, reinterpret_cast<const uint8_t *>(adata + i), lanesToLoad);
-                const auto mismatch_mask = rdata_v != adata_v;
-                mismatch += hn::CountTrue(d8, mismatch_mask);
-            }
+            int mismatch = fastplong_simd::countMismatches(rdata + p, adata, alen);
             if (mismatch <= threshold)
             {
                 return p;
@@ -136,15 +116,7 @@ int AdapterTrimmer::searchAdapter(string *read, const string &adapter, double ed
     {
         for (int p = searchStart; p < searchEnd - alen; p++)
         {
-            size_t mismatch = 0;
-            for (size_t i = 0; i < alen; i += N)
-            {
-                const size_t lanesToLoad = min(alen - i, N);
-                const auto rdata_v = hn::LoadN(d8, reinterpret_cast<const uint8_t *>(rdata + i + p), lanesToLoad);
-                const auto adata_v = hn::LoadN(d8, reinterpret_cast<const uint8_t *>(adata + i), lanesToLoad);
-                const auto mismatch_mask = rdata_v != adata_v;
-                mismatch += hn::CountTrue(d8, mismatch_mask);
-            }
+            int mismatch = fastplong_simd::countMismatches(rdata + p, adata, alen);
             if (mismatch < minMismatch)
             {
                 minMismatch = mismatch;
