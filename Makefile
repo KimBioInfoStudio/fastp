@@ -32,10 +32,17 @@ LIBDEFLATE_LIB := $(DIR_LIBDEFLATE)/build/libdeflate.a
 
 # On Linux: fully static binary; on macOS: static libs, dynamic system runtime
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_S),Linux)
   STATIC_LD_FLAGS := -static -Wl,--no-as-needed -lpthread
 else
   STATIC_LD_FLAGS := -lpthread
+endif
+
+# isa-l: macOS reports arm64 but isa-l expects aarch64 for NEON assembly
+ISAL_MAKE_ARGS :=
+ifeq ($(UNAME_M),arm64)
+  ISAL_MAKE_ARGS := host_cpu=aarch64 arch=aarch64
 endif
 
 # Default target: build deps from submodules and link statically
@@ -44,7 +51,7 @@ ${BIN_TARGET}: $(ISAL_LIB) $(LIBDEFLATE_LIB) ${OBJ}
 
 # Build isa-l static library from submodule
 $(ISAL_LIB):
-	$(MAKE) -C $(DIR_ISAL) -f Makefile.unx lib
+	$(MAKE) -C $(DIR_ISAL) -f Makefile.unx lib $(ISAL_MAKE_ARGS)
 
 # Build libdeflate static library from submodule
 $(LIBDEFLATE_LIB):
