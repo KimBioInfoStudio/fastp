@@ -8,7 +8,6 @@ DIR_LIBDEFLATE := ./third_party/libdeflate
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 INCLUDE_DIRS ?=
-LIBRARY_DIRS ?=
 
 SRC := $(wildcard ${DIR_SRC}/*.cpp)
 OBJ := $(patsubst %.cpp,${DIR_OBJ}/%.o,$(notdir ${SRC}))
@@ -27,11 +26,7 @@ CXXFLAGS := -std=c++11 -pthread -g -O3 -MD -MP \
 	$(foreach includedir,$(INCLUDE_DIRS),-I$(includedir)) \
 	${CXXFLAGS}
 
-# --- Link mode (default): link against system-installed libraries ---
-LIBS := -lisal -ldeflate -lpthread
-LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(LIBS) $(LD_FLAGS)
-
-# --- Static mode: build from submodules and link statically ---
+# --- Static linking: build from submodules ---
 ISAL_LIB := $(DIR_ISAL)/bin/isa-l.a
 LIBDEFLATE_LIB := $(DIR_LIBDEFLATE)/build/libdeflate.a
 
@@ -43,13 +38,9 @@ else
   STATIC_LD_FLAGS := -lpthread
 endif
 
-# Default target: link against system libraries
-${BIN_TARGET}: ${OBJ}
-	$(CXX) $(OBJ) -o $@ $(LD_FLAGS)
-
-# Static target: build deps from submodules and link statically
-static: $(ISAL_LIB) $(LIBDEFLATE_LIB) ${OBJ}
-	$(CXX) $(OBJ) -o ${BIN_TARGET} $(ISAL_LIB) $(LIBDEFLATE_LIB) $(STATIC_LD_FLAGS)
+# Default target: build deps from submodules and link statically
+${BIN_TARGET}: $(ISAL_LIB) $(LIBDEFLATE_LIB) ${OBJ}
+	$(CXX) $(OBJ) -o $@ $(ISAL_LIB) $(LIBDEFLATE_LIB) $(STATIC_LD_FLAGS)
 
 # Build isa-l static library from submodule
 $(ISAL_LIB):
@@ -76,7 +67,7 @@ ${DIR_OBJ}/hwy_abort.o:${DIR_HWY}/hwy/abort.cc
 	@mkdir -p $(@D)
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
 
-.PHONY: clean static install clean-deps
+.PHONY: clean install clean-deps
 clean:
 	@rm -rf $(DIR_OBJ)
 	@rm -f $(TARGET)
