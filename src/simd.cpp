@@ -27,9 +27,9 @@ void CountQualityMetricsImpl(const char* qualstr, const char* seqstr, int len,
     int qualSum = 0;
     int i = 0;
 
-    // Process in chunks, accumulating into wider types to avoid overflow.
-    // Process in blocks of up to 255 vectors to avoid u16 overflow during
-    // quality sum accumulation (255 * 255 = 65025 fits in u16).
+    // Process in blocks of up to 255 vectors to avoid u16 overflow.
+    // SumsOf2 produces at most 2*93 = 186 per u16 lane (valid FASTQ range).
+    // Over 255 iterations: 255 * 186 = 47430, safely within u16 (max 65535).
     const int blockSize = 255 * N;
 
     for (int blockStart = 0; blockStart < len; blockStart += blockSize) {
