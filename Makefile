@@ -5,11 +5,10 @@ DIR_TEST := ./test
 DIR_HWY := ./third_party/highway
 DIR_ISAL := ./third_party/isa-l
 DIR_LIBDEFLATE := ./third_party/libdeflate
+DIR_GTEST := ./third_party/googletest
 
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
-INCLUDE_DIRS ?=
-LIBRARY_DIRS ?=
 
 SRC := $(wildcard ${DIR_SRC}/*.cpp)
 TEST := $(wildcard ${DIR_TEST}/*.cpp)
@@ -29,12 +28,13 @@ CXX ?= g++
 CXXFLAGS := -std=c++17 -pthread -g -O3 -MD -MP \
 	-I. -I${DIR_INC} -I${DIR_SRC} -I${DIR_HWY} \
 	-I${DIR_ISAL}/include -I${DIR_LIBDEFLATE} \
-	$(foreach includedir,$(INCLUDE_DIRS),-I$(includedir)) \
 	${CXXFLAGS}
 
 # Static libraries built from submodules
 ISAL_LIB := $(DIR_ISAL)/bin/isa-l.a
 LIBDEFLATE_LIB := $(DIR_LIBDEFLATE)/build/libdeflate.a
+GTEST_LIB := $(DIR_GTEST)/build/lib/libgtest.a
+GTEST_MAIN_LIB := $(DIR_GTEST)/build/lib/libgtest_main.a
 
 # On Linux: fully static binary; on macOS: static libs, dynamic system runtime
 UNAME_S := $(shell uname -s)
@@ -60,6 +60,13 @@ $(LIBDEFLATE_LIB):
 		-DLIBDEFLATE_BUILD_GZIP=OFF && \
 		cmake --build build
 
+# Build googletest static library from submodule
+$(GTEST_LIB) $(GTEST_MAIN_LIB):
+	cd $(DIR_GTEST) && cmake -B build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DBUILD_GMOCK=OFF && \
+		cmake --build build
+
 ${DIR_OBJ}/%.o:${DIR_SRC}/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
@@ -83,6 +90,7 @@ clean:
 clean-deps:
 	-$(MAKE) -C $(DIR_ISAL) -f Makefile.unx clean 2>/dev/null || true
 	-rm -rf $(DIR_LIBDEFLATE)/build 2>/dev/null || true
+	-rm -rf $(DIR_GTEST)/build 2>/dev/null || true
 
 install:
 	install $(TARGET) $(BINDIR)/$(TARGET)
@@ -90,11 +98,11 @@ install:
 
 ${DIR_OBJ}/%.o:${DIR_TEST}/%.cpp
 	@mkdir -p $(@D)
-	$(CXX) -c $< -o $@ $(CXXFLAGS)
+	$(CXX) -c $< -o $@ $(CXXFLAGS) -I${DIR_GTEST}/googletest/include
 
-test: $(ISAL_LIB) $(LIBDEFLATE_LIB) ${TEST_OBJ} ${OBJ}
+test: $(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) ${TEST_OBJ} ${OBJ}
 	@mkdir -p bin
-	$(CXX) $(TEST_OBJ) ${OBJ:./obj/main.o=} -o ${TEST_TARGET} $(ISAL_LIB) $(LIBDEFLATE_LIB) $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(LD_FLAGS) -lgtest -lgtest_main
+	$(CXX) $(TEST_OBJ) ${OBJ:./obj/main.o=} -o ${TEST_TARGET} $(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) $(GTEST_MAIN_LIB) $(LD_FLAGS)
 	./${TEST_TARGET}
 
 -include $(OBJ:.o=.d)
