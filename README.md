@@ -12,6 +12,8 @@ fastplong supports batch processing of multiple FASTQ files in a folder, see - [
   - [install with Bioconda](#install-with-bioconda)
   - [download the latest prebuilt binary for Linux users](#download-the-latest-prebuilt-binary-for-linux-users)
   - [or compile from source](#or-compile-from-source)
+    - [Option A: static build](#option-a-static-build-recommended-no-system-library-dependencies)
+    - [Option B: link against system libraries](#option-b-link-against-system-libraries)
 - [input and output](#input-and-output)
   - [output to STDOUT](#output-to-stdout)
   - [input from STDIN](#input-from-stdin)
@@ -67,28 +69,41 @@ mv fastplong.0.2.2 fastplong
 chmod a+x ./fastplong
 ```
 ## or compile from source
-`fastplong` depends on `libdeflate` and `isa-l` for fast decompression and compression of zipped data, and depends on `libhwy` for SIMD acceleration. It's recommended to install all of them via Anaconda:
-```
-conda install conda-forge::libdeflate
-conda install conda-forge::isa-l
-conda install conda-forge::libhwy
-```
-You can also try to install them with other package management systems like `apt/yum` on Linux, or `brew` on MacOS. Otherwise you can compile them from source (https://github.com/intel/isa-l, https://github.com/ebiggers/libdeflate, and https://github.com/google/highway)
+`fastplong` depends on `isa-l` and `libdeflate`, which are included as git submodules. You can either build them from source (static mode) or link against system-installed libraries.
 
-### download and build fastplong
+### Option A: static build (recommended, no system library dependencies)
+Build isa-l and libdeflate from submodules and link them statically. Requires `cmake` and a C/C++ compiler.
 ```shell
-# get source (you can also use browser to download from master or releases)
-git clone https://github.com/OpenGene/fastplong.git
-
-# build
+git clone --recursive https://github.com/OpenGene/fastplong.git
 cd fastplong
-make -j
-
-# test
-make test
+make static -j
 
 # Install
 sudo make install
+```
+
+### Option B: link against system libraries
+First install isa-l and libdeflate via your package manager:
+```shell
+# Ubuntu/Debian
+apt install libisal-dev libdeflate-dev
+
+# macOS
+brew install isa-l libdeflate
+```
+Then build fastplong:
+```shell
+git clone --recursive https://github.com/OpenGene/fastplong.git
+cd fastplong
+make -j
+
+# Install
+sudo make install
+```
+
+If you already cloned without `--recursive`, initialize the submodules with:
+```shell
+git submodule update --init --recursive
 ```
 
 # input and output
