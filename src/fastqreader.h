@@ -32,7 +32,7 @@ SOFTWARE.
 #include <iostream>
 #include <fstream>
 #include "readpool.h"
-#include <isa-l/igzip_lib.h>
+#include "igzip_lib.h"
 
 class FastqReader{
 public:
