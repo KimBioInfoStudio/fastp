@@ -32,29 +32,21 @@ CXXFLAGS := -std=c++17 -pthread -g -O3 -MD -MP \
 	$(foreach includedir,$(INCLUDE_DIRS),-I$(includedir)) \
 	${CXXFLAGS}
 
-# --- Link mode (default): link against system-installed libraries ---
-LIBS := -lisal -ldeflate -lpthread
-LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(LIBS) $(LD_FLAGS)
-
-# --- Static mode: build from submodules and link statically ---
+# Static libraries built from submodules
 ISAL_LIB := $(DIR_ISAL)/bin/isa-l.a
 LIBDEFLATE_LIB := $(DIR_LIBDEFLATE)/build/libdeflate.a
 
 # On Linux: fully static binary; on macOS: static libs, dynamic system runtime
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
-  STATIC_LD_FLAGS := -static -Wl,--no-as-needed -lpthread
+  LD_FLAGS := -static -Wl,--no-as-needed -lpthread
 else
-  STATIC_LD_FLAGS := -lpthread
+  LD_FLAGS := -lpthread
 endif
 
-# Default target: link against system libraries
-${BIN_TARGET}: ${OBJ}
-	$(CXX) $(OBJ) -o $@ $(LD_FLAGS)
-
-# Static target: build deps from submodules and link statically
-static: $(ISAL_LIB) $(LIBDEFLATE_LIB) ${OBJ}
-	$(CXX) $(OBJ) -o ${BIN_TARGET} $(ISAL_LIB) $(LIBDEFLATE_LIB) $(STATIC_LD_FLAGS)
+# Default target: build deps from submodules and link statically
+${BIN_TARGET}: $(ISAL_LIB) $(LIBDEFLATE_LIB) ${OBJ}
+	$(CXX) $(OBJ) -o $@ $(ISAL_LIB) $(LIBDEFLATE_LIB) $(LD_FLAGS)
 
 # Build isa-l static library from submodule
 $(ISAL_LIB):
@@ -81,7 +73,7 @@ ${DIR_OBJ}/hwy_abort.o:${DIR_HWY}/hwy/abort.cc
 	@mkdir -p $(@D)
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
 
-.PHONY: clean static install clean-deps
+.PHONY: clean install clean-deps test
 
 clean:
 	@rm -rf $(DIR_OBJ)
@@ -100,14 +92,9 @@ ${DIR_OBJ}/%.o:${DIR_TEST}/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
 
-test-static: $(ISAL_LIB) $(LIBDEFLATE_LIB) ${TEST_OBJ} ${OBJ}
+test: $(ISAL_LIB) $(LIBDEFLATE_LIB) ${TEST_OBJ} ${OBJ}
 	@mkdir -p bin
-	$(CXX) $(TEST_OBJ) ${OBJ:./obj/main.o=} -o ${TEST_TARGET} $(ISAL_LIB) $(LIBDEFLATE_LIB) $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(STATIC_LD_FLAGS) -lgtest -lgtest_main
-	./${TEST_TARGET}
-
-test: ${TEST_OBJ} ${OBJ}
-	@mkdir -p bin
-	$(CXX) $(TEST_OBJ) ${OBJ:./obj/main.o=} -o ${TEST_TARGET} $(LD_FLAGS) -lgtest -lgtest_main
+	$(CXX) $(TEST_OBJ) ${OBJ:./obj/main.o=} -o ${TEST_TARGET} $(ISAL_LIB) $(LIBDEFLATE_LIB) $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(LD_FLAGS) -lgtest -lgtest_main
 	./${TEST_TARGET}
 
 -include $(OBJ:.o=.d)
