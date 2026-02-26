@@ -2,6 +2,7 @@ DIR_INC := ./inc
 DIR_SRC := ./src
 DIR_OBJ := ./obj
 DIR_TEST := ./test
+DIR_HWY := ./third_party/highway
 
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
@@ -13,14 +14,18 @@ TEST := $(wildcard ${DIR_TEST}/*.cpp)
 OBJ := $(patsubst %.cpp,${DIR_OBJ}/%.o,$(notdir ${SRC}))
 TEST_OBJ := $(patsubst %.cpp,${DIR_OBJ}/%.o,$(notdir ${TEST}))
 
+# Highway runtime dispatch support
+HWY_OBJS := ${DIR_OBJ}/hwy_targets.o ${DIR_OBJ}/hwy_abort.o
+OBJ += $(HWY_OBJS)
+
 TARGET := fastplong
 
 BIN_TARGET := ${TARGET}
 TEST_TARGET := bin/fastplong_unittest
 
 CXX ?= g++
-CXXFLAGS := -std=c++14 -pthread -g -O3 -MP -MD -I${DIR_INC} -I${DIR_SRC} $(foreach includedir,$(INCLUDE_DIRS),-I$(includedir)) ${CXXFLAGS}
-LIBS := -lisal -ldeflate -lpthread -lhwy
+CXXFLAGS := -std=c++14 -pthread -g -O3 -MP -MD -I. -I${DIR_HWY} -I${DIR_INC} -I${DIR_SRC} $(foreach includedir,$(INCLUDE_DIRS),-I$(includedir)) ${CXXFLAGS}
+LIBS := -lisal -ldeflate -lpthread
 STATIC_FLAGS := -static -L. -Wl,--no-as-needed -pthread
 LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(LIBS) $(LD_FLAGS)
 STATIC_LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(STATIC_FLAGS) $(LIBS) $(STATIC_LD_FLAGS)
@@ -33,7 +38,16 @@ static:${OBJ}
 	$(CXX) $(OBJ) -o ${BIN_TARGET} $(STATIC_LD_FLAGS)
 
 ${DIR_OBJ}/%.o:${DIR_SRC}/%.cpp
-	@mkdir -p $(@D) 
+	@mkdir -p $(@D)
+	$(CXX) -c $< -o $@ $(CXXFLAGS)
+
+# Highway source files for runtime CPU detection and error handling
+${DIR_OBJ}/hwy_targets.o:${DIR_HWY}/hwy/targets.cc
+	@mkdir -p $(@D)
+	$(CXX) -c $< -o $@ $(CXXFLAGS)
+
+${DIR_OBJ}/hwy_abort.o:${DIR_HWY}/hwy/abort.cc
+	@mkdir -p $(@D)
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
 
 .PHONY:clean
