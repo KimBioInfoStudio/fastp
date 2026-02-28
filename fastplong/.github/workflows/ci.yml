@@ -1,0 +1,32 @@
+name: fastplong ci
+on:
+  pull_request:
+    branches:
+      - main
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout scm
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: install build dependencies (Ubuntu)
+        run: sudo apt update && sudo apt install -y build-essential cmake nasm
+        if: runner.os == 'Linux'
+
+      - name: make fastplong
+        run: make -j
+
+      - name: make test
+        run: make test
+
+      - name: test
+        run: chmod a+x ./fastplong && ./fastplong --version

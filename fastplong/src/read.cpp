@@ -1,0 +1,353 @@
+#include "read.h"
+#include <sstream>
+#include <cstring>
+#include "util.h"
+
+Read::Read(string* name, string* seq, string* strand, string* quality, bool phred64){
+	mName = name;
+	mSeq = seq;
+	mStrand = strand;
+	mQuality = quality;
+	if(phred64)
+		convertPhred64To33();
+}
+
+Read::Read(const char* name, const char* seq, const char* strand, const char* quality, bool phred64) {
+	mName = new string(name);
+	mSeq = new string(seq);
+	mStrand = new string(strand);
+	mQuality = new string(quality);
+	if(phred64)
+		convertPhred64To33();
+}
+
+Read::~Read(){
+	if(mName)
+		delete mName;
+	if(mStrand)
+		delete mStrand;
+	if(mQuality)
+		delete mQuality;
+	if(mSeq)
+		delete mSeq;
+}
+
+void Read::convertPhred64To33(){
+	for(int i=0; i<mQuality->length(); i++) {
+		(*mQuality)[i] = max(33, (*mQuality)[i] - (64-33));
+	}
+}
+
+void Read::print(){
+	std::cerr << *mName << endl;
+	std::cerr << *(mSeq) << endl;
+	std::cerr << *mStrand << endl;
+	std::cerr << *mQuality << endl;
+}
+
+void Read::printFile(ofstream& file){
+	file << *mName << endl;
+	file << *mSeq << endl;
+	file << *mStrand << endl;
+	file << *mQuality << endl;
+}
+
+Read* Read::reverseComplement(){
+	string seq = Sequence::reverseComplement(mSeq);
+	string qual;
+	qual.assign(mQuality->rbegin(), mQuality->rend());
+	return new Read(mName->c_str(), seq.c_str(), "+", qual.c_str());
+}
+
+void Read::resize(int len) {
+	if(len > length() || len<0)
+		return ;
+	mSeq->resize(len);
+	mQuality->resize(len);
+}
+   
+void Read::trimFront(int len){
+	len = min(length()-1, len);
+	mSeq->erase(0, len);
+	mQuality->erase(0, len);
+}
+
+string Read::lastIndex(){
+	int len = mName->length();
+	if(len<5)
+		return "";
+	for(int i=len-3;i>=0;i--){
+		if((*mName)[i]==':' || (*mName)[i]=='+'){
+			return mName->substr(i+1, len-i);
+		}
+	}
+	return "";
+}
+
+string Read::firstIndex(){
+	int len = mName->length();
+	int end = len;
+	if(len<5)
+		return "";
+	for(int i=len-3;i>=0;i--){
+		if((*mName)[i]=='+')
+			end = i-1;
+		if((*mName)[i]==':'){
+			return mName->substr(i+1, end-i);
+		}
+	}
+	return "";
+}
+
+int Read::lowQualCount(int qual){
+	int count = 0;
+	for(int q=0;q<mQuality->size();q++){
+		if((*mQuality)[q] < qual + 33)
+			count++;
+	}
+	return count;
+}
+
+int Read::length(){
+	return mSeq->length();
+}
+
+string Read::toString() {
+	return *mName + "\n" + *mSeq + "\n" + *mStrand + "\n" + *mQuality + "\n";
+}
+
+void Read::appendToString(string* target) {
+	size_t size = mName->length() + mSeq->length() + mStrand->length() + mQuality->length() + 4;
+	char* str = new char[size + 1];
+	size_t total = 0;
+	memcpy(str + total, mName->data(), mName->length());
+	total +=  mName->length();
+	str[total] = '\n';
+	total++;
+	memcpy(str + total, mSeq->data(), mSeq->length());
+	total +=  mSeq->length();
+	str[total] = '\n';
+	total++;
+	memcpy(str + total, mStrand->data(), mStrand->length());
+	total +=  mStrand->length();
+	str[total] = '\n';
+	total++;
+	memcpy(str + total, mQuality->data(), mQuality->length());
+	total +=  mQuality->length();
+	str[total] = '\n';
+	total++;
+	str[total] = '\0';
+
+	target->append(str, size);
+	delete[] str;
+}
+
+void Read::appendToStringWithTag(string* target, string tag) {
+	size_t size = mName->length() + 1 + tag.length() + mSeq->length() + mStrand->length() + mQuality->length() + 4;
+	char* str = new char[size + 1];
+	size_t total = 0;
+	memcpy(str + total, mName->data(), mName->length());
+	total +=  mName->length();
+	str[total] = ' ';
+	total++;
+	memcpy(str + total, tag.data(), tag.length());
+	total +=  tag.length();
+	str[total] = '\n';
+	total++;
+	memcpy(str + total, mSeq->data(), mSeq->length());
+	total +=  mSeq->length();
+	str[total] = '\n';
+	total++;
+	memcpy(str + total, mStrand->data(), mStrand->length());
+	total +=  mStrand->length();
+	str[total] = '\n';
+	total++;
+	memcpy(str + total, mQuality->data(), mQuality->length());
+	total +=  mQuality->length();
+	str[total] = '\n';
+	total++;
+	str[total] = '\0';
+
+	target->append(str, size);
+	delete[] str;
+}
+
+string Read::toStringWithTag(string tag) {
+	return *mName + " " + tag + "\n" + *mSeq + "\n" + *mStrand + "\n" + *mQuality + "\n";
+}
+
+bool Read::fixMGI() {
+	int len = mName->length();
+	if((*mName)[len-1]=='1' || (*mName)[len-1]=='2') {
+		if((*mName)[len-2] == '/') {
+			string* newName = new string(mName->substr(0, len-2) + " " + mName->substr(len-2, 2));
+			delete mName;
+			mName = newName;
+			return true;
+		}
+	}
+	return false;
+}
+
+vector<Read*> Read::breakByGap(int start, int len) {
+	vector<Read*> out;
+	int len1 = start;
+	int len2 = length() - start - len;
+	if(len1 > 0 ) {
+		string* seq = new string(*mSeq, 0, start);
+		string* qual = new string(*mQuality, 0, start);
+		string* name = new string(*mName);
+		name->insert(1, "split-by-adapter-left-");
+		string* strand = new string(*mStrand);
+		Read* r = new Read(name, seq, strand, qual );
+		out.push_back(r);
+	}
+	if(len2 > 0 ) {
+		string* seq = new string(*mSeq, start+len, len2);
+		string* qual = new string(*mQuality, start+len, len2);
+		string* name = new string(*mName);
+		name->insert(1,"split-by-adapter-right-");
+		string* strand = new string(*mStrand);
+		Read* r = new Read(name, seq, strand, qual );
+		out.push_back(r);
+	}
+	return out;
+}
+
+void Read::maskRegionWithN(int start, int len) {
+	if(start < 0 || len <= 0 || start >= length())
+		return;
+	if(start + len > length())
+		len = length() - start;
+	for(int i=start; i<start+len; i++) {
+		(*mSeq)[i] = 'N';
+	}
+}
+
+vector<Read*> Read::breakByRegions(vector<pair<int, int>>& regions) {
+	vector<Read*> out;
+	int lastEnd = -1;
+	for(int i=0; i<regions.size(); i++) {
+		int start = regions[i].first;
+		int end = regions[i].second;
+		if(start < 0)
+			start = 0;
+		if(end >= length())
+			end = length() - 1;
+		if(start > end || start >= length())
+			continue;
+		if(start > lastEnd + 1) {
+			int len = start - lastEnd - 1;
+			string* seq = new string(*mSeq, lastEnd + 1, len);
+			string* qual = new string(*mQuality, lastEnd + 1, len);
+			string* name = new string(*mName);
+			name->insert(1, "r" + to_string(i+1)+"-");
+			string* strand = new string(*mStrand);
+			Read* r = new Read(name, seq, strand, qual );
+			out.push_back(r);
+		}
+		lastEnd = end;
+	}
+	if(lastEnd < length() - 1) {
+		int len = length() - lastEnd - 1;
+		string* seq = new string(*mSeq, lastEnd + 1, len);
+		string* qual = new string(*mQuality, lastEnd + 1, len);
+		string* name = new string(*mName);
+		name->insert(1, "r"+to_string(regions.size()+1)+"-");
+		string* strand = new string(*mStrand);
+		Read* r = new Read(name, seq, strand, qual );
+		out.push_back(r);
+	}
+	return out;
+}
+
+ReadPair::ReadPair(Read* left, Read* right){
+	mLeft = left;
+	mRight = right;
+}
+
+ReadPair::~ReadPair(){
+	if(mLeft){
+		delete mLeft;
+		mLeft = NULL;
+	}
+	if(mRight){
+		delete mRight;
+		mRight = NULL;
+	}
+}
+
+Read* ReadPair::fastMerge(){
+	Read* rcRight = mRight->reverseComplement();
+	int len1 = mLeft->length();
+	int len2 = rcRight->length();
+	// use the pointer directly for speed
+	const char* str1 = mLeft->mSeq->c_str();
+	const char* str2 = rcRight->mSeq->c_str();
+	const char* qual1 = mLeft->mQuality->c_str();
+	const char* qual2 = rcRight->mQuality->c_str();
+
+	// we require at least 30 bp overlapping to merge a pair
+	const int MIN_OVERLAP = 30;
+	bool overlapped = false;
+	int olen = MIN_OVERLAP;
+	int diff = 0;
+	// the diff count for 1 high qual + 1 low qual
+	int lowQualDiff = 0;
+
+	while(olen <= min(len1, len2)){
+		diff = 0;
+		lowQualDiff = 0;
+		bool ok = true;
+		int offset = len1 - olen;
+		for(int i=0;i<olen;i++){
+			if(str1[offset+i] != str2[i]){
+				diff++;
+				// one is >= Q30 and the other is <= Q15
+				if((qual1[offset+i]>='?' && qual2[i]<='0') || (qual1[offset+i]<='0' && qual2[i]>='?')){
+					lowQualDiff++;
+				}
+				// we disallow high quality diff, and only allow up to 3 low qual diff
+				if(diff>lowQualDiff || lowQualDiff>=3){
+					ok = false;
+					break;
+				}
+			}
+		}
+		if(ok){
+			overlapped = true;
+			break;
+		}
+		olen++;
+	}
+
+	if(overlapped){
+		int offset = len1 - olen;
+		stringstream ss;
+		ss << mLeft->mName << " merged offset:" << offset << " overlap:" << olen << " diff:" << diff;
+		string mergedName = ss.str();
+		string mergedSeq = mLeft->mSeq->substr(0, offset) + *(rcRight->mSeq);
+		string mergedQual = mLeft->mQuality->substr(0, offset) + *(rcRight->mQuality);
+		// quality adjuction and correction for low qual diff
+		for(int i=0;i<olen;i++){
+			if(str1[offset+i] != str2[i]){
+				if(qual1[offset+i]>='?' && qual2[i]<='0'){
+					mergedSeq[offset+i] = str1[offset+i];
+					mergedQual[offset+i] = qual1[offset+i];
+				} else {
+					mergedSeq[offset+i] = str2[i];
+					mergedQual[offset+i] = qual2[i];
+				}
+			} else {
+				// add the quality of the pair to make a high qual
+				mergedQual[offset+i] =  qual1[offset+i] + qual2[i] - 33;
+			}
+		}
+		delete rcRight;
+		return new Read(new string(mergedName), new string(mergedSeq), new string("+"), new string(mergedQual));
+	}
+
+	delete rcRight;
+	return NULL;
+}
+
