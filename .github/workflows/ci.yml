@@ -80,7 +80,7 @@ jobs:
         run: ./bin/fastp -i testdata/R1.fq -o /dev/null
 
       - name: fastp PE smoke test
-        run: ./bin/fastp -i testdata/R1.fq -I testdata/R2.fq -o /dev/null -O /dev/null
+        run: ./bin/fastp -i testdata/R1.fq -I testdata/R2.fq -o /dev/null -O /tmp/pe_R2.fq
 
       - name: fastplong smoke test
         run: ./bin/fastplong -i testdata/R1.fq -o /dev/null
@@ -95,6 +95,11 @@ jobs:
           - macos-latest
     runs-on: ${{ matrix.os }}
     steps:
+      - name: checkout testdata
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: testdata
+
       - name: download binaries
         uses: actions/download-artifact@v4
         with:
