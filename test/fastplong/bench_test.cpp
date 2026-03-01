@@ -16,6 +16,8 @@
 #include <fstream>
 #include <random>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -161,15 +163,41 @@ protected:
 fs::path FastplongBench::dir;
 
 // ---------------------------------------------------------------------------
+// JSON result collector (customSmallerIsBetter for github-action-benchmark)
+// ---------------------------------------------------------------------------
+
+static std::vector<std::pair<std::string, double>> benchResults;
+
+static void writeBenchJson(const char* path) {
+    std::ofstream out(path);
+    out << "[\n";
+    for (size_t i = 0; i < benchResults.size(); i++) {
+        out << "  {\"name\": \"" << benchResults[i].first
+            << "\", \"unit\": \"ms\", \"value\": " << benchResults[i].second << "}";
+        if (i + 1 < benchResults.size()) out << ",";
+        out << "\n";
+    }
+    out << "]\n";
+}
+
+// ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
 
 TEST_F(FastplongBench, ONT_1M_ungz) {
     double ms = runFastplong(se("ONT_1M.fq"));
     printf("  fastplong ONT 1M ungz:  %.0f ms\n", ms);
+    benchResults.emplace_back("fastplong ONT 1M ungz", ms);
 }
 
 TEST_F(FastplongBench, ONT_1M_gz) {
     double ms = runFastplong(se("ONT_1M.fq.gz"));
     printf("  fastplong ONT 1M gz:    %.0f ms\n", ms);
+    benchResults.emplace_back("fastplong ONT 1M gz", ms);
+}
+
+// Write JSON after all benchmarks complete
+TEST_F(FastplongBench, ZZ_WriteResults) {
+    const char* path = std::getenv("BENCH_JSON_OUTPUT");
+    if (path) writeBenchJson(path);
 }

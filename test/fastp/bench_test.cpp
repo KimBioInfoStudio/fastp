@@ -9,6 +9,8 @@
 #include <fstream>
 #include <random>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -126,25 +128,53 @@ protected:
 fs::path FastpBench::dir;
 
 // ---------------------------------------------------------------------------
+// JSON result collector (customSmallerIsBetter for github-action-benchmark)
+// ---------------------------------------------------------------------------
+
+static std::vector<std::pair<std::string, double>> benchResults;
+
+static void writeBenchJson(const char* path) {
+    std::ofstream out(path);
+    out << "[\n";
+    for (size_t i = 0; i < benchResults.size(); i++) {
+        out << "  {\"name\": \"" << benchResults[i].first
+            << "\", \"unit\": \"ms\", \"value\": " << benchResults[i].second << "}";
+        if (i + 1 < benchResults.size()) out << ",";
+        out << "\n";
+    }
+    out << "]\n";
+}
+
+// ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
 
 TEST_F(FastpBench, SE150_1M_ungz) {
     double ms = runFastp(se("SE_1M.fq"));
     printf("  fastp SE150 1M ungz:  %.0f ms\n", ms);
+    benchResults.emplace_back("fastp SE150 1M ungz", ms);
 }
 
 TEST_F(FastpBench, SE150_1M_gz) {
     double ms = runFastp(se("SE_1M.fq.gz"));
     printf("  fastp SE150 1M gz:    %.0f ms\n", ms);
+    benchResults.emplace_back("fastp SE150 1M gz", ms);
 }
 
 TEST_F(FastpBench, PE150_1M_ungz) {
     double ms = runFastp(pe("PE_R1_1M.fq", "PE_R2_1M.fq"));
     printf("  fastp PE150 1M ungz:  %.0f ms\n", ms);
+    benchResults.emplace_back("fastp PE150 1M ungz", ms);
 }
 
 TEST_F(FastpBench, PE150_1M_gz) {
     double ms = runFastp(pe("PE_R1_1M.fq.gz", "PE_R2_1M.fq.gz"));
     printf("  fastp PE150 1M gz:    %.0f ms\n", ms);
+    benchResults.emplace_back("fastp PE150 1M gz", ms);
+}
+
+// Write JSON after all benchmarks complete
+TEST_F(FastpBench, ZZ_WriteResults) {
+    const char* path = std::getenv("BENCH_JSON_OUTPUT");
+    if (path) writeBenchJson(path);
 }

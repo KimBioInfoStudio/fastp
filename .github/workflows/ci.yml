@@ -36,18 +36,136 @@ jobs:
         run: brew install cmake nasm
         if: runner.os == 'macOS'
 
-      - name: build
-        run: make -j ${{ steps.cpu-cores.outputs.count }}
+      - name: build binaries and test executables
+        run: make bin/fastp bin/fastplong bin/fastp_unittest bin/fastplong_unittest -j ${{ steps.cpu-cores.outputs.count }}
 
-      - name: verify binaries
+      - name: upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.os }}
+          path: bin/
+          retention-days: 1
+
+  smoke-test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout testdata
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: testdata
+
+      - name: download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-${{ matrix.os }}
+          path: bin/
+
+      - name: fix permissions
+        run: chmod +x bin/*
+
+      - name: fastp version
+        run: ./bin/fastp --version
+
+      - name: fastplong version
+        run: ./bin/fastplong --version
+
+      - name: fastp SE smoke test
+        run: ./bin/fastp -i testdata/R1.fq -o /dev/null
+
+      - name: fastp PE smoke test
+        run: ./bin/fastp -i testdata/R1.fq -I testdata/R2.fq -o /dev/null -O /dev/null
+
+      - name: fastplong smoke test
+        run: ./bin/fastplong -i testdata/R1.fq -o /dev/null
+
+  unit-test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-${{ matrix.os }}
+          path: bin/
+
+      - name: fix permissions
+        run: chmod +x bin/*
+
+      - name: fastp unit tests
+        run: ./bin/fastp_unittest --gtest_filter=-'FastpBench*'
+
+      - name: fastplong unit tests
+        run: ./bin/fastplong_unittest --gtest_filter=-'FastplongBench*'
+
+  bench:
+    needs: build
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-ubuntu-latest
+          path: bin/
+
+      - name: fix permissions
+        run: chmod +x bin/*
+
+      - name: runner info
         run: |
-          ./bin/fastp --version
-          ./bin/fastplong --version
+          echo "## Runner Environment" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$(uname)" = "Darwin" ]; then
+            echo "| CPU | $(sysctl -n machdep.cpu.brand_string)" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Cores | $(sysctl -n hw.ncpu)" >> "$GITHUB_STEP_SUMMARY"
+            echo "| RAM | $(( $(sysctl -n hw.memsize) / 1073741824 )) GB" >> "$GITHUB_STEP_SUMMARY"
+            echo "| OS | $(sw_vers -productName) $(sw_vers -productVersion)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| CPU | $(lscpu | grep 'Model name' | sed 's/.*:\s*//')" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Cores | $(nproc)" >> "$GITHUB_STEP_SUMMARY"
+            echo "| RAM | $(free -h | awk '/Mem:/{print $2}')" >> "$GITHUB_STEP_SUMMARY"
+            echo "| OS | $(. /etc/os-release && echo "$PRETTY_NAME")" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "| Kernel | $(uname -r)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: smoke test
+      - name: fastp benchmarks
+        run: ./bin/fastp_unittest --gtest_filter='FastpBench*'
+        env:
+          BENCH_JSON_OUTPUT: fastp_bench.json
+
+      - name: fastplong benchmarks
+        run: ./bin/fastplong_unittest --gtest_filter='FastplongBench*'
+        env:
+          BENCH_JSON_OUTPUT: fastplong_bench.json
+
+      - name: merge benchmark results
         run: |
-          ./bin/fastp -i testdata/R1.fq -o /dev/null
-          ./bin/fastplong -i testdata/R1.fq -o /dev/null
+          jq -s 'add' fastp_bench.json fastplong_bench.json > bench_results.json
 
-      - name: unit tests
-        run: make test
+      - name: store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: customSmallerIsBetter
+          output-file-path: bench_results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: '150%'
+          comment-on-alert: true
+          fail-on-alert: false

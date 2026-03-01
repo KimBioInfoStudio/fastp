@@ -188,36 +188,30 @@ $(OBJ_TEST_FL)/%.o: $(DIR_TEST_FL)/%.cpp
 TEST_FP_TARGET := bin/fastp_unittest
 TEST_FL_TARGET := bin/fastplong_unittest
 
-test-fastp: $(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) \
-            $(TEST_FP_OBJ) $(FASTP_OBJ) $(COMMON_FP_OBJ) $(HWY_FP_OBJS)
+$(TEST_FP_TARGET): $(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) \
+                   $(TEST_FP_OBJ) $(FASTP_OBJ) $(COMMON_FP_OBJ) $(HWY_FP_OBJS)
 	@mkdir -p bin
 	$(CXX) $(TEST_FP_OBJ) $(filter-out $(OBJ_FASTP)/main.o,$(FASTP_OBJ)) \
-		$(COMMON_FP_OBJ) $(HWY_FP_OBJS) -o $(TEST_FP_TARGET) \
+		$(COMMON_FP_OBJ) $(HWY_FP_OBJS) -o $@ \
 		$(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) $(GTEST_MAIN_LIB) $(LD_FLAGS)
+
+$(TEST_FL_TARGET): $(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) \
+                   $(TEST_FL_OBJ) $(FASTPLONG_OBJ) $(COMMON_FL_OBJ) $(HWY_FL_OBJS)
+	@mkdir -p bin
+	$(CXX) $(TEST_FL_OBJ) $(filter-out $(OBJ_FASTPLONG)/main.o,$(FASTPLONG_OBJ)) \
+		$(COMMON_FL_OBJ) $(HWY_FL_OBJS) -o $@ \
+		$(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) $(GTEST_MAIN_LIB) $(LD_FLAGS)
+
+test-fastp: $(TEST_FP_TARGET)
 	./$(TEST_FP_TARGET) --gtest_filter=-'FastpBench*'
 
-bench-fastp: bin/fastp $(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) \
-             $(TEST_FP_OBJ) $(FASTP_OBJ) $(COMMON_FP_OBJ) $(HWY_FP_OBJS)
-	@mkdir -p bin
-	$(CXX) $(TEST_FP_OBJ) $(filter-out $(OBJ_FASTP)/main.o,$(FASTP_OBJ)) \
-		$(COMMON_FP_OBJ) $(HWY_FP_OBJS) -o $(TEST_FP_TARGET) \
-		$(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) $(GTEST_MAIN_LIB) $(LD_FLAGS)
-	./$(TEST_FP_TARGET) --gtest_filter='FastpBench*'
-
-test-fastplong: $(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) \
-                $(TEST_FL_OBJ) $(FASTPLONG_OBJ) $(COMMON_FL_OBJ) $(HWY_FL_OBJS)
-	@mkdir -p bin
-	$(CXX) $(TEST_FL_OBJ) $(filter-out $(OBJ_FASTPLONG)/main.o,$(FASTPLONG_OBJ)) \
-		$(COMMON_FL_OBJ) $(HWY_FL_OBJS) -o $(TEST_FL_TARGET) \
-		$(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) $(GTEST_MAIN_LIB) $(LD_FLAGS)
+test-fastplong: $(TEST_FL_TARGET)
 	./$(TEST_FL_TARGET) --gtest_filter=-'FastplongBench*'
 
-bench-fastplong: bin/fastplong $(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) \
-                 $(TEST_FL_OBJ) $(FASTPLONG_OBJ) $(COMMON_FL_OBJ) $(HWY_FL_OBJS)
-	@mkdir -p bin
-	$(CXX) $(TEST_FL_OBJ) $(filter-out $(OBJ_FASTPLONG)/main.o,$(FASTPLONG_OBJ)) \
-		$(COMMON_FL_OBJ) $(HWY_FL_OBJS) -o $(TEST_FL_TARGET) \
-		$(ISAL_LIB) $(LIBDEFLATE_LIB) $(GTEST_LIB) $(GTEST_MAIN_LIB) $(LD_FLAGS)
+bench-fastp: bin/fastp $(TEST_FP_TARGET)
+	./$(TEST_FP_TARGET) --gtest_filter='FastpBench*'
+
+bench-fastplong: bin/fastplong $(TEST_FL_TARGET)
 	./$(TEST_FL_TARGET) --gtest_filter='FastplongBench*'
 
 test: test-fastp test-fastplong
