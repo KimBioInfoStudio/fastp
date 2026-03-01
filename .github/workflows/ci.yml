@@ -117,7 +117,7 @@ jobs:
 
   bench:
     needs: build
-    if: github.ref == 'refs/heads/master'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: checkout
@@ -169,6 +169,7 @@ jobs:
         with:
           tool: customSmallerIsBetter
           output-file-path: bench_results.json
+          benchmark-data-dir-path: dev/bench/${{ github.ref_name }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
           alert-threshold: '150%'
