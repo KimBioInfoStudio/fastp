@@ -1,4 +1,4 @@
-// End-to-end benchmarks for fastplong: 1M ONT long reads (gz + ungz).
+// End-to-end benchmarks for fastplong: 100K ONT long reads (gz + ungz).
 // Test data is generated at runtime with a fixed random seed so that
 // every run processes the same sequences.
 //
@@ -25,7 +25,7 @@ namespace fs = std::filesystem;
 // ONT FASTQ data generator (fixed-seed, deterministic)
 // ---------------------------------------------------------------------------
 
-static constexpr int      NUM_READS = 1'000'000;
+static constexpr int      NUM_READS = 100'000;
 static constexpr uint32_t SEED      = 42;
 static const char BASES[] = "ACGT";
 
@@ -133,10 +133,10 @@ protected:
         fs::create_directories(dir);
 
         std::mt19937 rng(SEED);
-        writeOntFastq(dir / "ONT_1M.fq", NUM_READS, rng);
+        writeOntFastq(dir / "ONT_100K.fq", NUM_READS, rng);
 
         // Compress to .gz (keep original)
-        std::string cmd = "gzip -kf " + (dir / "ONT_1M.fq").string();
+        std::string cmd = "gzip -kf " + (dir / "ONT_100K.fq").string();
         ::system(cmd.c_str());
     }
 
@@ -184,16 +184,16 @@ static void writeBenchJson(const char* path) {
 // Benchmarks
 // ---------------------------------------------------------------------------
 
-TEST_F(FastplongBench, ONT_1M_ungz) {
-    double ms = runFastplong(se("ONT_1M.fq"));
-    printf("  fastplong ONT 1M ungz:  %.0f ms\n", ms);
-    benchResults.emplace_back("fastplong ONT 1M ungz", ms);
+TEST_F(FastplongBench, ONT_100K_ungz) {
+    double ms = runFastplong(se("ONT_100K.fq"));
+    printf("  fastplong ONT 100K ungz:  %.0f ms\n", ms);
+    benchResults.emplace_back("fastplong ONT 100K ungz", ms);
 }
 
-TEST_F(FastplongBench, ONT_1M_gz) {
-    double ms = runFastplong(se("ONT_1M.fq.gz"));
-    printf("  fastplong ONT 1M gz:    %.0f ms\n", ms);
-    benchResults.emplace_back("fastplong ONT 1M gz", ms);
+TEST_F(FastplongBench, ONT_100K_gz) {
+    double ms = runFastplong(se("ONT_100K.fq.gz"));
+    printf("  fastplong ONT 100K gz:    %.0f ms\n", ms);
+    benchResults.emplace_back("fastplong ONT 100K gz", ms);
 }
 
 // Write JSON after all benchmarks complete

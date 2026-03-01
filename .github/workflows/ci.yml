@@ -134,21 +134,22 @@ jobs:
 
       - name: runner info
         run: |
-          echo "## Runner Environment" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          info() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          info "## Runner Environment"
+          info "| Property | Value |"
+          info "|----------|-------|"
           if [ "$(uname)" = "Darwin" ]; then
-            echo "| CPU | $(sysctl -n machdep.cpu.brand_string)" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Cores | $(sysctl -n hw.ncpu)" >> "$GITHUB_STEP_SUMMARY"
-            echo "| RAM | $(( $(sysctl -n hw.memsize) / 1073741824 )) GB" >> "$GITHUB_STEP_SUMMARY"
-            echo "| OS | $(sw_vers -productName) $(sw_vers -productVersion)" >> "$GITHUB_STEP_SUMMARY"
+            info "| CPU | $(sysctl -n machdep.cpu.brand_string) |"
+            info "| Cores | $(sysctl -n hw.ncpu) |"
+            info "| RAM | $(( $(sysctl -n hw.memsize) / 1073741824 )) GB |"
+            info "| OS | $(sw_vers -productName) $(sw_vers -productVersion) |"
           else
-            echo "| CPU | $(lscpu | grep 'Model name' | sed 's/.*:\s*//')" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Cores | $(nproc)" >> "$GITHUB_STEP_SUMMARY"
-            echo "| RAM | $(free -h | awk '/Mem:/{print $2}')" >> "$GITHUB_STEP_SUMMARY"
-            echo "| OS | $(. /etc/os-release && echo "$PRETTY_NAME")" >> "$GITHUB_STEP_SUMMARY"
+            info "| CPU | $(lscpu | grep 'Model name' | sed 's/.*:\s*//') |"
+            info "| Cores | $(nproc) |"
+            info "| RAM | $(free -h | awk '/Mem:/{print $2}') |"
+            info "| OS | $(. /etc/os-release && echo "$PRETTY_NAME") |"
           fi
-          echo "| Kernel | $(uname -r)" >> "$GITHUB_STEP_SUMMARY"
+          info "| Kernel | $(uname -r) |"
 
       - name: fastp benchmarks
         run: ./bin/fastp_unittest --gtest_filter='FastpBench*'
