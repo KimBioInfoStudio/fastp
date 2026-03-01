@@ -1,0 +1,86 @@
+name: release
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-amd64
+          - os: macos-latest
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Get number of CPU cores
+        uses: SimenB/github-actions-cpu-cores@v2
+        id: cpu-cores
+
+      - name: install build dependencies (Ubuntu)
+        run: sudo apt update && sudo apt install -y build-essential nasm cmake
+        if: runner.os == 'Linux'
+
+      - name: install build dependencies (macOS)
+        run: brew install cmake nasm
+        if: runner.os == 'macOS'
+
+      - name: build
+        run: make -j ${{ steps.cpu-cores.outputs.count }}
+
+      - name: verify binaries
+        run: |
+          ./bin/fastp --version
+          ./bin/fastplong --version
+
+      - name: package fastp
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          dir="fastp-${tag}-${{ matrix.platform }}"
+          mkdir -p "$dir"
+          cp bin/fastp "$dir/"
+          cp README.md LICENSE "$dir/"
+          tar czf "${dir}.tar.gz" "$dir"
+
+      - name: package fastplong
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          dir="fastplong-${tag}-${{ matrix.platform }}"
+          mkdir -p "$dir"
+          cp bin/fastplong "$dir/"
+          cp README.md LICENSE "$dir/"
+          tar czf "${dir}.tar.gz" "$dir"
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: '*.tar.gz'
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*.tar.gz
