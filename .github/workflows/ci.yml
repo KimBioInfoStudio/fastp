@@ -165,6 +165,13 @@ jobs:
         run: |
           jq -s 'add' fastp_bench.json fastplong_bench.json > bench_results.json
 
+      - name: benchmark summary
+        run: |
+          echo "## Benchmark Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Test | Time (ms) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|-----------|" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.[] | "| \(.name) | \(.value | round) |"' bench_results.json >> "$GITHUB_STEP_SUMMARY"
+
       - name: store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
         with:
