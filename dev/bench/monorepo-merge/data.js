@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772362514040,
+  "lastUpdate": 1772363733831,
   "repoUrl": "https://github.com/KimBioInfoStudio/fastp",
   "entries": {
     "Benchmark": [
@@ -107,6 +107,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "fastplong ONT 100K gz",
             "value": 23824.1,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kimy@nvidia.com",
+            "name": "Kim Yang",
+            "username": "KimBioInfoStudio"
+          },
+          "committer": {
+            "email": "kimy@nvidia.com",
+            "name": "Kim Yang",
+            "username": "KimBioInfoStudio"
+          },
+          "distinct": true,
+          "id": "5ffada1308fb1114e9e5ce614130c08dd1f7f286",
+          "message": "ci: add release workflow to package binaries on tag push\n\nBuilds fastp and fastplong for linux-amd64 and macos-arm64,\npackages each with README and LICENSE into .tar.gz archives,\nand publishes them as GitHub release assets.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-01T19:07:03+08:00",
+          "tree_id": "d23c1bc7039fd5e7d66d6a4ead4ed24a6c537be8",
+          "url": "https://github.com/KimBioInfoStudio/fastp/commit/5ffada1308fb1114e9e5ce614130c08dd1f7f286"
+        },
+        "date": 1772363733297,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "fastp SE150 1M ungz",
+            "value": 21148.6,
+            "unit": "ms"
+          },
+          {
+            "name": "fastp SE150 1M gz",
+            "value": 21477,
+            "unit": "ms"
+          },
+          {
+            "name": "fastp PE150 1M ungz",
+            "value": 7461.6,
+            "unit": "ms"
+          },
+          {
+            "name": "fastp PE150 1M gz",
+            "value": 7976.85,
+            "unit": "ms"
+          },
+          {
+            "name": "fastplong ONT 100K ungz",
+            "value": 21683,
+            "unit": "ms"
+          },
+          {
+            "name": "fastplong ONT 100K gz",
+            "value": 24158.1,
             "unit": "ms"
           }
         ]
