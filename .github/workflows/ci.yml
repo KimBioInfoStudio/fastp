@@ -1,4 +1,4 @@
-name: fastp ci
+name: ci
 on:
   pull_request:
     branches:
@@ -35,11 +35,18 @@ jobs:
         run: brew install cmake nasm
         if: runner.os == 'macOS'
 
-      - name: make fastp
+      - name: build
         run: make -j ${{ steps.cpu-cores.outputs.count }}
 
-      - name: test
-        run: ./fastp --version
+      - name: verify binaries
+        run: |
+          ./bin/fastp --version
+          ./bin/fastplong --version
 
-      - name: test run
-        run: ./fastp -i testdata/R1.fq -o /dev/null
+      - name: smoke test
+        run: |
+          ./bin/fastp -i testdata/R1.fq -o /dev/null
+          ./bin/fastplong -i testdata/R1.fq -o /dev/null
+
+      - name: unit tests
+        run: make test

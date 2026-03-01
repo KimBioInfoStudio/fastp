@@ -1,5 +1,8 @@
 .DS_Store
-fastp
+
+# Build output
+/bin/
+/build/
 
 # Prerequisites
 *.d

@@ -7,9 +7,11 @@ https://badges.debian.net/badges/debian/unstable/fastp/version.svg)](https://pac
 [![European Galaxy server](https://img.shields.io/badge/usegalaxy-.eu-brightgreen?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAASCAYAAABB7B6eAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAACXBIWXMAAAsTAAALEwEAmpwYAAACC2lUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iWE1QIENvcmUgNS40LjAiPgogICA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPgogICAgICA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIgogICAgICAgICAgICB4bWxuczp0aWZmPSJodHRwOi8vbnMuYWRvYmUuY29tL3RpZmYvMS4wLyI+CiAgICAgICAgIDx0aWZmOlJlc29sdXRpb25Vbml0PjI8L3RpZmY6UmVzb2x1dGlvblVuaXQ+CiAgICAgICAgIDx0aWZmOkNvbXByZXNzaW9uPjE8L3RpZmY6Q29tcHJlc3Npb24+CiAgICAgICAgIDx0aWZmOk9yaWVudGF0aW9uPjE8L3RpZmY6T3JpZW50YXRpb24+CiAgICAgICAgIDx0aWZmOlBob3RvbWV0cmljSW50ZXJwcmV0YXRpb24+MjwvdGlmZjpQaG90b21ldHJpY0ludGVycHJldGF0aW9uPgogICAgICA8L3JkZjpEZXNjcmlwdGlvbj4KICAgPC9yZGY6UkRGPgo8L3g6eG1wbWV0YT4KD0UqkwAAAn9JREFUOBGlVEuLE0EQruqZiftwDz4QYT1IYM8eFkHFw/4HYX+GB3/B4l/YP+CP8OBNTwpCwFMQXAQPKtnsg5nJZpKdni6/6kzHvAYDFtRUT71f3UwAEbkLch9ogQxcBwRKMfAnM1/CBwgrbxkgPAYqlBOy1jfovlaPsEiWPROZmqmZKKzOYCJb/AbdYLso9/9B6GppBRqCrjSYYaquZq20EUKAzVpjo1FzWRDVrNay6C/HDxT92wXrAVCH3ASqq5VqEtv1WZ13Mdwf8LFyyKECNbgHHAObWhScf4Wnj9CbQpPzWYU3UFoX3qkhlG8AY2BTQt5/EA7qaEPQsgGLWied0A8VKrHAsCC1eJ6EFoUd1v6GoPOaRAtDPViUr/wPzkIFV9AaAZGtYB568VyJfijV+ZBzlVZJ3W7XHB2RESGe4opXIGzRTdjcAupOK09RA6kzr1NTrTj7V1ugM4VgPGWEw+e39CxO6JUw5XhhKihmaDacU2GiR0Ohcc4cZ+Kq3AjlEnEeRSazLs6/9b/kh4eTC+hngE3QQD7Yyclxsrf3cpxsPXn+cFdenF9aqlBXMXaDiEyfyfawBz2RqC/O9WF1ysacOpytlUSoqNrtfbS642+4D4CS9V3xb4u8P/ACI4O810efRu6KsC0QnjHJGaq4IOGUjWTo/YDZDB3xSIxcGyNlWcTucb4T3in/3IaueNrZyX0lGOrWndstOr+w21UlVFokILjJLFhPukbVY8OmwNQ3nZgNJNmKDccusSb4UIe+gtkI+9/bSLJDjqn763f5CQ5TLApmICkqwR0QnUPKZFIUnoozWcQuRbC0Km02knj0tPYx63furGs3x/iPnz83zJDVNtdP3QAAAABJRU5ErkJggg==)](https://usegalaxy.eu/root?tool_id=fastp)
 
 # fastp
-A tool designed to provide ultrafast all-in-one preprocessing and quality control for FastQ data.     
+A tool designed to provide ultrafast all-in-one preprocessing and quality control for FastQ data.
 
-This tool is designed for processing short reads (i.e. Illumina NovaSeq, MGI), if you are looking for tools to process long reads (i.e. Nanopore, PacBio, Cyclone), please use [fastplong](https://github.com/OpenGene/fastplong).  
+This repository contains two tools:
+* **fastp** — for short reads (Illumina NovaSeq, MGI, etc.)
+* **fastplong** — for long reads (Nanopore, PacBio, Cyclone, etc.) — see [fastplong](#fastplong-1)
 
 fastp supports batch processing of multiple FASTQ files in a folder, see - [batch processing](#batch-processing)  
 
@@ -56,6 +58,7 @@ If you use fastp in your work, you can cite fastp as:  *Shifu Chen. fastp 1.0: A
 - [batch processing](#batch-processing)
 - [all options](#all-options)
 - [benchmark](#benchmark)
+- [fastplong](#fastplong-1)
 - [citations](#citations)
 
 # features
@@ -115,7 +118,7 @@ mv fastp.0.23.4 fastp
 chmod a+x ./fastp
 ```
 ## or compile from source
-`fastp` depends on `isa-l` and `libdeflate`, which are included as git submodules and built from source automatically. Requires `cmake`, `nasm` (for isa-l SIMD assembly), and a C/C++ compiler.
+Both `fastp` and `fastplong` are built from this repository. They depend on `isa-l` and `libdeflate`, which are included as git submodules and built from source automatically. Requires `cmake`, `nasm` (for isa-l SIMD assembly), and a C/C++ compiler.
 
 Install build dependencies:
 ```shell
@@ -130,9 +133,11 @@ Then build:
 ```shell
 git clone --recursive https://github.com/OpenGene/fastp.git
 cd fastp
-make -j
+make -j              # builds both bin/fastp and bin/fastplong
+make bin/fastp -j    # or build fastp only
+make bin/fastplong -j  # or build fastplong only
 
-# Install
+# Install (both binaries to /usr/local/bin)
 sudo make install
 ```
 
@@ -369,13 +374,13 @@ fastp uses a hash algorithm to find the identical sequences. Due to the possible
 Since `v0.22.0`, fastp supports deduplication for FASTQ data. Specify `-D` or `--dedup` to enable this option. When `--dedup` is enabled, the `dup_calc_accuracy` level is default to `3`, and it can be changed to any value of 1 ~ 6.
 
 # batch processing
-[parallel.py](https://github.com/OpenGene/fastp/blob/master/parallel.py) is a script to preprocess all FASTQ files within a folder in parallel. It will automatically couple the paired-end FASTQ files.  
+[parallel.py](https://github.com/OpenGene/fastp/blob/master/scripts/parallel.py) is a script to preprocess all FASTQ files within a folder in parallel. It will automatically couple the paired-end FASTQ files.  
 
 This script will generate an `overall.html` to present an aggregate summary for all processed FASTQ files.  
 
 ## example
 ```shell
-python parallel.py -i /path/to/input/folder -o /path/to/output/folder -r /path/to/reports/folder -a '-f 3 -t 2'
+python scripts/parallel.py -i /path/to/input/folder -o /path/to/output/folder -r /path/to/reports/folder -a '-f 3 -t 2'
 ```
 which means to  
 ```
@@ -386,7 +391,7 @@ which means to
 . output all HTML and JSON reports to /path/to/reports/folder
 ```
 
-See `python parallel.py -h` for details.
+See `python scripts/parallel.py -h` for details.
 
 # all options
 ```shell
@@ -526,6 +531,92 @@ Performance optimizations (SIMD vectorization, heap allocation elimination, look
 With compressed input, gzip I/O dominates wall time (~95%), limiting observable gains. Uncompressed input isolates the processing pipeline where SIMD and branchless optimizations have full effect.
 
 See [docs/benchmark-2026-02-25.md](docs/benchmark-2026-02-25.md) for full methodology, per-optimization breakdown, and reproduction steps.
+
+# fastplong
+Ultrafast preprocessing and quality control for long reads (Nanopore, PacBio, Cyclone, etc.).
+
+## simple usage
+```
+fastplong -i in.fq -o out.fq
+```
+Both input and output can be gzip compressed. By default, the HTML report is saved to `fastplong.html` (can be specified with `-h` option), and the JSON report is saved to `fastplong.json` (can be specified with `-j` option).
+
+## examples of report
+`fastplong` creates reports in both HTML and JSON format.
+* HTML report: http://opengene.org/fastplong/fastplong.html
+* JSON report: http://opengene.org/fastplong/fastplong.json
+
+## key features
+In addition to the common quality filtering, length filtering, low complexity filtering, adapter trimming, polyX trimming, and global trimming shared with fastp, `fastplong` provides features designed specifically for long reads:
+
+* **Adapter trimming with edit distance** — uses edit distance to detect adapters at both read start (5') and end (3'), with configurable mismatch tolerance (`-d, --distance_threshold`, default 0.25). Adapters can be auto-detected or specified with `-s` / `-e`.
+* **Break reads into subreads** (`-b, --break`) — detect low quality regions by sliding window and discard them, splitting the read into high-quality subreads.
+* **Mask low quality regions** (`-N, --mask`) — replace bases in low quality regions with N instead of discarding them.
+* **Per-read quality cutting** — sliding window cutting from 5' (`-5, --cut_front`) and 3' (`-3, --cut_tail`) with configurable window sizes up to 1,000,000 bp.
+
+## fastplong workflow
+![fastplong workflow](https://opengene.org/fastplong/workflow.jpeg)
+
+## batch processing
+[parallel_long.py](https://github.com/OpenGene/fastp/blob/master/scripts/parallel_long.py) is a script to preprocess all long-read FASTQ files within a folder in parallel.
+
+```shell
+python scripts/parallel_long.py -i /path/to/input -o /path/to/output -r /path/to/reports -a '--cut_front --cut_tail'
+```
+
+## all fastplong options
+```shell
+usage: fastplong -i <in> -o <out> [options...]
+options:
+  -i, --in                           read input file name (string [=])
+  -o, --out                          read output file name (string [=])
+      --failed_out                   specify the file to store reads that cannot pass the filters. (string [=])
+  -z, --compression                  compression level for gzip output (1 ~ 9). 1 is fastest, 9 is smallest, default is 4. (int [=4])
+      --stdin                        input from STDIN.
+      --stdout                       stream passing-filters reads to STDOUT. Disabled by default.
+      --reads_to_process             specify how many reads to be processed. Default 0 means process all reads. (int [=0])
+      --dont_overwrite               don't overwrite existing files. Overwritting is allowed by default.
+  -V, --verbose                      output verbose log information (i.e. when every 1M reads are processed).
+  -A, --disable_adapter_trimming     adapter trimming is enabled by default. If this option is specified, adapter trimming is disabled
+  -s, --start_adapter                the adapter sequence at read start (5'). (string [=auto])
+  -e, --end_adapter                  the adapter sequence at read end (3'). (string [=auto])
+  -a, --adapter_fasta                specify a FASTA file to trim by all the sequences in this FASTA file (string [=])
+  -d, --distance_threshold           threshold of edit-distance/adapter-length (0.0 ~ 1.0), default 0.25 (double [=0.25])
+      --trimming_extension           extend trimming beyond detected adapter, default 10 (int [=10])
+  -f, --trim_front                   trimming how many bases in front, default is 0 (int [=0])
+  -t, --trim_tail                    trimming how many bases in tail, default is 0 (int [=0])
+  -x, --trim_poly_x                  enable polyX trimming in 3' ends.
+      --poly_x_min_len               the minimum length to detect polyX in the read tail. 10 by default. (int [=10])
+  -5, --cut_front                    sliding window from 5' to 3', drop bases if mean quality < threshold
+  -3, --cut_tail                     sliding window from 3' to 5', drop bases if mean quality < threshold
+  -W, --cut_window_size              window size for cut_front/cut_tail. Range: 1~1000, default: 4 (int [=4])
+  -M, --cut_mean_quality             mean quality threshold for cut_front/cut_tail. Range: 1~36, default: 20 (int [=20])
+  -N, --mask                         mask low quality regions with N
+      --mask_window_size             sliding window size for N masking (5~1000000), default: 50 (int [=50])
+      --mask_mean_quality            mean quality threshold for N masking (5~30), default: 10 (int [=10])
+  -b, --break                        break reads into subreads by discarding low quality regions
+      --break_window_size            sliding window size for breaking (5~1000000), default: 100 (int [=100])
+      --break_mean_quality           mean quality threshold for breaking (5~30), default: 10 (int [=10])
+  -Q, --disable_quality_filtering    disable quality filtering (enabled by default)
+  -q, --qualified_quality_phred      base quality threshold, default 15 (Q15) (int [=15])
+  -u, --unqualified_percent_limit    max percent of unqualified bases (0~100), default 40 (int [=40])
+      --n_base_limit                 max N bases allowed (0~1000000), default 1000000 (no limit) (int [=1000000])
+  -n, --n_percent_limit              max N base percentage (0~100), default 10 (int [=10])
+  -m, --mean_qual                    min mean quality score, default 0 (no requirement) (int [=0])
+  -L, --disable_length_filtering     disable length filtering (enabled by default)
+  -l, --length_required              min read length, default 20 (int [=20])
+      --length_limit                 max read length, default 0 (no limit) (int [=0])
+  -y, --low_complexity_filter        enable low complexity filter
+  -Y, --complexity_threshold         complexity threshold (0~100), default 30 (int [=30])
+  -j, --json                         JSON report file name (string [=fastplong.json])
+  -h, --html                         HTML report file name (string [=fastplong.html])
+  -R, --report_title                 report title (string [=fastplong report])
+  -w, --thread                       worker threads, default 3 (int [=3])
+      --split                        split output by file number (2~999), disabled by default (int [=0])
+      --split_by_lines               split output by lines per file (>=1000), disabled by default (long [=0])
+      --split_prefix_digits          sequential number padding digits (1~10), default 4 (int [=4])
+  -?, --help                         print this message
+```
 
 # citations
 ### Shifu Chen. 2025. fastp 1.0: An ultra-fast all-round tool for FASTQ data quality control and preprocessing. iMeta 2025: [https://doi.org/10.1002/imt2.107](https://doi.org/10.1002/imt2.70078)
