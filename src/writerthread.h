@@ -44,6 +44,9 @@ private:
     atomic_long mBufferLength;
     SingleProducerSingleConsumerList<string*>** mBufferLists;
     int mWorkingBufferList;
+    bool mPreCompressed;
+    int mIsalLevel;
+    string* mAccumBuf;  // per-thread accumulation for flight batching
 };
 
 #endif

@@ -26,7 +26,7 @@ SOFTWARE.
 #include "util.h"
 #include <string.h>
 
-Writer::Writer(Options* opt, string filename, int compression, bool isSTDOUT){
+Writer::Writer(Options* opt, string filename, int compression, bool isSTDOUT, bool preCompressed){
 	mCompression = compression;
 	mFilename = filename;
 	mCompressor = NULL;
@@ -37,6 +37,7 @@ Writer::Writer(Options* opt, string filename, int compression, bool isSTDOUT){
 	mOptions = opt;
 	mBufSize = mOptions->writerBufferSize;
 	mSTDOUT = isSTDOUT;
+	mPreCompressed = preCompressed;
 	init();
 }
 
@@ -67,23 +68,16 @@ void Writer::init(){
 		mFP = stdout;
 		return ;
 	}
-	if (ends_with(mFilename, ".gz")){
+	if (ends_with(mFilename, ".gz") && !mPreCompressed){
 		mCompressor = libdeflate_alloc_compressor(mCompression);
 		if(mCompressor == NULL) {
 			error_exit("Failed to alloc libdeflate_alloc_compressor, please check the libdeflate library.");
 		}
 		mZipped = true;
-		mFP = fopen(mFilename.c_str(), "wb");
-		if(mFP == NULL) {
-			error_exit("Failed to write: " + mFilename);
-		}
-	} else {
-		mFP = fopen(mFilename.c_str(), "wb");
-		if(mFP == NULL) {
-			error_exit("Failed to write: " + mFilename);
-		}
-		//mOutStream = new ofstream();
-		//mOutStream->open(mFilename.c_str(), ifstream::out);
+	}
+	mFP = fopen(mFilename.c_str(), "wb");
+	if(mFP == NULL) {
+		error_exit("Failed to write: " + mFilename);
 	}
 }
 
