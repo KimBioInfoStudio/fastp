@@ -10,6 +10,7 @@
 #include <atomic>
 #include <mutex>
 #include "singleproducersingleconsumerlist.h"
+#include <chrono>
 
 using namespace std;
 
@@ -43,6 +44,7 @@ private:
     void deleteWriter();
     void inputPwrite(int tid, string* data);
     void setInputCompletedPwrite();
+    void updateAdaptiveTimeout(int tid, size_t bytes, std::chrono::steady_clock::time_point now);
 
 private:
     Writer* mWriter1;
@@ -63,6 +65,12 @@ private:
     int mFd;
     OffsetSlot* mOffsetRing;
     size_t* mNextSeq;  // per-worker pack sequence counter
+
+    // Adaptive timeout for flight batch compression
+    std::chrono::steady_clock::time_point* mLastInputTs;
+    std::chrono::steady_clock::time_point* mLastFlushTs;
+    double* mIngressBpsEma;
+    int64_t* mDynamicTimeoutUs;
 };
 
 #endif

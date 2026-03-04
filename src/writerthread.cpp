@@ -4,8 +4,16 @@
 #include <memory.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <cerrno>
+#include <cstring>
+#include <thread>
 
 static const size_t ISAL_BATCH_SIZE = 512 << 10; // 512 KB accumulation threshold
+
+// Adaptive timeout constants for flight batch compression
+static constexpr int64_t ADAPTIVE_MIN_TIMEOUT_US = 2000;   // 2ms floor
+static constexpr int64_t ADAPTIVE_MAX_TIMEOUT_US = 50000;  // 50ms ceiling
+static constexpr double  ADAPTIVE_EMA_ALPHA = 0.2;
 
 WriterThread::WriterThread(Options* opt, string filename, bool isSTDOUT){
     mOptions = opt;
@@ -53,6 +61,18 @@ WriterThread::WriterThread(Options* opt, string filename, bool isSTDOUT){
         mWorkingBufferList = 0;
         mBufferLength = 0;
         mAccumBuf = new string[mOptions->thread];
+    }
+
+    // Adaptive timeout state (shared by both modes)
+    auto now = std::chrono::steady_clock::now();
+    mLastInputTs = new std::chrono::steady_clock::time_point[mOptions->thread];
+    mLastFlushTs = new std::chrono::steady_clock::time_point[mOptions->thread];
+    mIngressBpsEma = new double[mOptions->thread]();
+    mDynamicTimeoutUs = new int64_t[mOptions->thread];
+    for (int t = 0; t < mOptions->thread; t++) {
+        mLastInputTs[t] = now;
+        mLastFlushTs[t] = now;
+        mDynamicTimeoutUs[t] = ADAPTIVE_MAX_TIMEOUT_US;
     }
 }
 
@@ -110,27 +130,6 @@ void WriterThread::setInputCompletedPwrite() {
     size_t offset = anyProcessed ?
         mOffsetRing[lastSeq & (OFFSET_RING_SIZE - 1)].cumulative_offset.load(std::memory_order_relaxed) : 0;
 
-    // Flush remaining .gz accum buffers sequentially (worker 0, 1, ..., W-1)
-    if (mPreCompressed) {
-        for (int t = 0; t < W; t++) {
-            if (!mAccumBuf[t].empty()) {
-                string compressed = isal_gzip_compress(
-                    mAccumBuf[t].data(), mAccumBuf[t].size(), mIsalLevel);
-                if (!compressed.empty()) {
-                    size_t written = 0;
-                    while (written < compressed.size()) {
-                        ssize_t ret = pwrite(mFd, compressed.data() + written,
-                                           compressed.size() - written, offset + written);
-                        if (ret <= 0) break;
-                        written += ret;
-                    }
-                    offset += compressed.size();
-                }
-                mAccumBuf[t].clear();
-            }
-        }
-    }
-
     ftruncate(mFd, offset);
 }
 
@@ -155,6 +154,23 @@ void WriterThread::input(int tid, string* data) {
         return;
     }
     if(mPreCompressed && !data->empty()) {
+        auto now = std::chrono::steady_clock::now();
+        updateAdaptiveTimeout(tid, data->size(), now);
+
+        // Adaptive timeout flush (before accumulating new data)
+        if (!mAccumBuf[tid].empty()) {
+            auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                now - mLastFlushTs[tid]).count();
+            if (elapsed_us >= mDynamicTimeoutUs[tid]) {
+                string compressed = isal_gzip_compress(
+                    mAccumBuf[tid].data(), mAccumBuf[tid].size(), mIsalLevel);
+                mBufferLists[tid]->produce(new string(std::move(compressed)));
+                mBufferLength++;
+                mAccumBuf[tid].clear();
+                mLastFlushTs[tid] = now;
+            }
+        }
+
         // Flight batching: accumulate raw data, compress when >= threshold
         mAccumBuf[tid].append(data->data(), data->length());
         delete data;
@@ -164,6 +180,7 @@ void WriterThread::input(int tid, string* data) {
             mBufferLists[tid]->produce(new string(std::move(compressed)));
             mBufferLength++;
             mAccumBuf[tid].clear();
+            mLastFlushTs[tid] = now;
         }
         return;
     }
@@ -176,51 +193,89 @@ void WriterThread::inputPwrite(int tid, string* data) {
     string writeData;
 
     if (mPreCompressed) {
-        // .gz: accumulate raw data, compress when threshold reached
-        mAccumBuf[tid].append(data->data(), data->length());
-        delete data;
-        if (mAccumBuf[tid].size() >= ISAL_BATCH_SIZE) {
-            writeData = isal_gzip_compress(
-                mAccumBuf[tid].data(), mAccumBuf[tid].size(), mIsalLevel);
-            mAccumBuf[tid].clear();
+        // Compress each pack individually to maintain correct file ordering.
+        // Cross-pack accumulation is incompatible with interleaved sequence
+        // numbering: worker 0 handles packs 0,3,6,... so batching them would
+        // place pack 0+3 data at pack 3's offset, before packs 1 and 2.
+        if (!data->empty()) {
+            writeData = isal_gzip_compress(data->data(), data->length(), mIsalLevel);
         }
-        // else: zero-size passthrough (writeData stays empty)
+        delete data;
     } else {
         // .fq: write pack data directly
         writeData = std::move(*data);
         delete data;
     }
 
-    // Wait for previous pack's cumulative offset
+    // Wait for previous pack's cumulative offset (progressive backoff)
     size_t offset = 0;
     if (seq > 0) {
         size_t prevSlot = (seq - 1) & (OFFSET_RING_SIZE - 1);
+        int spins = 0;
         while (mOffsetRing[prevSlot].published_seq.load(std::memory_order_acquire) != seq - 1) {
-            // spin-wait
+            if (++spins <= 32) {
+#if defined(__aarch64__)
+                __asm__ volatile("yield");
+#elif defined(__x86_64__) || defined(__i386__)
+                __asm__ volatile("pause");
+#endif
+            } else {
+                std::this_thread::yield();
+                spins = 0;
+            }
         }
         offset = mOffsetRing[prevSlot].cumulative_offset.load(std::memory_order_relaxed);
     }
 
     // pwrite data (skip if zero-size passthrough)
     size_t wsize = writeData.size();
+    size_t written = 0;
     if (wsize > 0) {
-        size_t written = 0;
         while (written < wsize) {
             ssize_t ret = pwrite(mFd, writeData.data() + written, wsize - written, offset + written);
-            if (ret <= 0) break;
+            if (ret < 0) {
+                if (errno == EINTR) continue;
+                error_exit("pwrite failed: " + string(strerror(errno)));
+            }
+            if (ret == 0) {
+                error_exit("pwrite returned 0 (disk full?)");
+            }
             written += ret;
         }
     }
 
     // Publish cumulative offset for next pack
     size_t mySlot = seq & (OFFSET_RING_SIZE - 1);
-    mOffsetRing[mySlot].cumulative_offset.store(offset + wsize, std::memory_order_relaxed);
+    mOffsetRing[mySlot].cumulative_offset.store(offset + written, std::memory_order_relaxed);
     mOffsetRing[mySlot].published_seq.store(seq, std::memory_order_release);
 
     mNextSeq[tid] += mOptions->thread;
 }
 
+void WriterThread::updateAdaptiveTimeout(int tid, size_t bytes,
+                                          std::chrono::steady_clock::time_point now) {
+    auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        now - mLastInputTs[tid]).count();
+    mLastInputTs[tid] = now;
+    if (elapsed_us > 0) {
+        double instant_bps = static_cast<double>(bytes) / elapsed_us * 1e6;
+        mIngressBpsEma[tid] = (1.0 - ADAPTIVE_EMA_ALPHA) * mIngressBpsEma[tid]
+                            + ADAPTIVE_EMA_ALPHA * instant_bps;
+        double target_us = static_cast<double>(ISAL_BATCH_SIZE)
+                         / (mIngressBpsEma[tid] > 1.0 ? mIngressBpsEma[tid] : 1.0) * 1e6;
+        int64_t clamped = static_cast<int64_t>(target_us);
+        if (clamped < ADAPTIVE_MIN_TIMEOUT_US) clamped = ADAPTIVE_MIN_TIMEOUT_US;
+        if (clamped > ADAPTIVE_MAX_TIMEOUT_US) clamped = ADAPTIVE_MAX_TIMEOUT_US;
+        mDynamicTimeoutUs[tid] = clamped;
+    }
+}
+
 void WriterThread::cleanup() {
+    delete[] mLastInputTs;  mLastInputTs = NULL;
+    delete[] mLastFlushTs;  mLastFlushTs = NULL;
+    delete[] mIngressBpsEma; mIngressBpsEma = NULL;
+    delete[] mDynamicTimeoutUs; mDynamicTimeoutUs = NULL;
+
     if (mPwriteMode) {
         if (mFd >= 0) {
             close(mFd);
