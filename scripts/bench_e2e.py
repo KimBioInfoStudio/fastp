@@ -772,6 +772,8 @@ def main():
     parser = argparse.ArgumentParser(description="fastp end-to-end benchmark")
     parser.add_argument("--json", metavar="PATH",
                         help="Load results from JSON and print summary table (skip benchmark)")
+    parser.add_argument("--merge", nargs=2, metavar=("ORIG_JSON", "OPT_JSON"),
+                        help="Merge two opt-only JSONs into a comparison table")
     parser.add_argument("--mode", default="all",
                         help="Comma-separated modes: fq-fq,fq-gz,gz-fq,gz-gz,"
                              "se-fq-fq,se-fq-gz,se-gz-fq,se-gz-gz,stdin-stdout,"
@@ -789,6 +791,38 @@ def main():
     parser.add_argument("--opt", default="/tmp/fastp_opt",
                         help="Optimized binary path (default: /tmp/fastp_opt)")
     args = parser.parse_args()
+
+    # --- Merge mode: combine two opt-only JSONs into comparison ---
+    if args.merge:
+        orig_p, opt_p = Path(args.merge[0]), Path(args.merge[1])
+        for p in (orig_p, opt_p):
+            if not p.exists():
+                print(f"File not found: {p}", file=sys.stderr)
+                sys.exit(1)
+        orig_report = json.loads(orig_p.read_text())
+        opt_report = json.loads(opt_p.read_text())
+        # Build merged report: use opt_report as base, inject orig data
+        merged = {
+            "system": opt_report.get("system", orig_report.get("system", {})),
+            "config": {
+                **opt_report["config"],
+                "orig": orig_report["config"]["opt"],  # baseline was run as --opt
+            },
+            "modes": {},
+        }
+        for mode in opt_report["modes"]:
+            opt_entry = opt_report["modes"][mode]
+            orig_entry = orig_report["modes"].get(mode, {})
+            merged["modes"][mode] = {
+                "threads": opt_entry.get("threads", orig_entry.get("threads")),
+                "opt_median": opt_entry["opt_median"],
+                "opt_peak_mb": opt_entry.get("opt_peak_mb", 0),
+                "orig_median": orig_entry.get("opt_median", 0),
+                "orig_peak_mb": orig_entry.get("opt_peak_mb", 0),
+                "verify": opt_entry.get("verify", {}),
+            }
+        print_summary(merged)
+        return
 
     # --- JSON-only mode: load and display ---
     if args.json:
