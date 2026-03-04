@@ -40,9 +40,6 @@ PairEndProcessor::PairEndProcessor(Options* opt){
     mLeftPackReadCounter = 0;
     mRightPackReadCounter = 0;
     mPackProcessedCounter = 0;
-
-    mLeftReadPool = new ReadPool(mOptions);
-    mRightReadPool = new ReadPool(mOptions);
 }
 
 PairEndProcessor::~PairEndProcessor() {
@@ -50,14 +47,6 @@ PairEndProcessor::~PairEndProcessor() {
     if(mDuplicate) {
         delete mDuplicate;
         mDuplicate = NULL;
-    }
-    if(mLeftReadPool) {
-        delete mLeftReadPool;
-        mLeftReadPool = NULL;
-    }
-    if(mRightReadPool) {
-        delete mRightReadPool;
-        mRightReadPool = NULL;
     }
     delete[] mLeftInputLists;
     delete[] mRightInputLists;
@@ -83,7 +72,7 @@ void PairEndProcessor::initOutput() {
 
     if(mOptions->out1.empty() && !mOptions->outputToSTDOUT)
         return;
-    
+
     mLeftWriter = new WriterThread(mOptions, mOptions->out1, mOptions->outputToSTDOUT);
     if(!mOptions->out2.empty())
         mRightWriter = new WriterThread(mOptions, mOptions->out2);
@@ -137,13 +126,13 @@ bool PairEndProcessor::process(){
     std::thread* readerRight = NULL;
     std::thread* readerInterveleaved = NULL;
 
-    mLeftInputLists = new SingleProducerSingleConsumerList<ReadPack*>*[mOptions->thread];
-    mRightInputLists = new SingleProducerSingleConsumerList<ReadPack*>*[mOptions->thread];
+    mLeftInputLists = new SingleProducerSingleConsumerList<RawPack*>*[mOptions->thread];
+    mRightInputLists = new SingleProducerSingleConsumerList<RawPack*>*[mOptions->thread];
 
     ThreadConfig** configs = new ThreadConfig*[mOptions->thread];
     for(int t=0; t<mOptions->thread; t++){
-        mLeftInputLists[t] = new SingleProducerSingleConsumerList<ReadPack*>();
-        mRightInputLists[t] = new SingleProducerSingleConsumerList<ReadPack*>();
+        mLeftInputLists[t] = new SingleProducerSingleConsumerList<RawPack*>();
+        mRightInputLists[t] = new SingleProducerSingleConsumerList<RawPack*>();
         configs[t] = new ThreadConfig(mOptions, t, true);
         configs[t]->setInputListPair(mLeftInputLists[t], mRightInputLists[t]);
         initConfig(configs[t]);
@@ -346,16 +335,47 @@ int PairEndProcessor::getPeakInsertSize() {
     return peak;
 }
 
-void PairEndProcessor::recycleToPool1(int tid, Read* r) {
-    // failed to recycle, then delete it
-    if(!mLeftReadPool->input(tid, r))
-        delete r;
-}
+ReadPack* PairEndProcessor::parseRawPack(RawPack* rawPack) {
+    int count = rawPack->readCount;
+    Read** data = new Read*[count];
+    char* buf = rawPack->buffer->data + rawPack->offset;
+    int len = rawPack->length;
+    int pos = 0;
+    bool phred64 = mOptions->phred64;
 
-void PairEndProcessor::recycleToPool2(int tid, Read* r) {
-    // failed to recycle, then delete it
-    if(!mRightReadPool->input(tid, r))
-        delete r;
+    for (int i = 0; i < count; i++) {
+        string* name = new string();
+        string* seq = new string();
+        string* strand = new string();
+        string* qual = new string();
+
+        // parse 4 lines per FASTQ record
+        string* fields[4] = {name, seq, strand, qual};
+        for (int f = 0; f < 4; f++) {
+            const char* nl = (const char*)memchr(buf + pos, '\n', len - pos);
+            int lineEnd;
+            if (nl)
+                lineEnd = nl - buf;
+            else
+                lineEnd = len;
+            int lineLen = lineEnd - pos;
+            // strip \r
+            if (lineLen > 0 && buf[pos + lineLen - 1] == '\r')
+                lineLen--;
+            fields[f]->assign(buf + pos, lineLen);
+            pos = (nl ? lineEnd + 1 : lineEnd);
+        }
+
+        data[i] = new Read(name, seq, strand, qual, phred64);
+    }
+
+    rawPack->buffer->release();
+    delete rawPack;
+
+    ReadPack* pack = new ReadPack;
+    pack->data = data;
+    pack->count = count;
+    return pack;
 }
 
 bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, ThreadConfig* config){
@@ -402,9 +422,9 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
 
         // filter by index
         if(mOptions->indexFilter.enabled && mFilter->filterByIndex(or1, or2)) {
-            recycleToPool1(tid, or1);
+            delete or1;
             or1 = NULL;
-            recycleToPool2(tid, or2);
+            delete or2;
             or2 = NULL;
             continue;
         }
@@ -471,7 +491,7 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
             if(ov.overlapped) {
                 Read* overlappedRead = new Read(new string(*r1->mName), new string(r1->mSeq->substr(max(0,ov.offset)), ov.overlap_len), new string(*r1->mStrand), new string(r1->mQuality->substr(max(0,ov.offset)), ov.overlap_len));
                 overlappedRead->appendToString(&overlappedOut);
-                recycleToPool1(tid, overlappedRead);
+                delete overlappedRead;
             }
         }
 
@@ -508,7 +528,7 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
                     readPassed++;
                     mergedCount++;
                 }
-                recycleToPool1(tid, merged);
+                delete merged;
                 mergeProcessed = true;
             } else if(mOptions->merge.includeUnmerged){
                 int result1 = mFilter->passFilter(r1);
@@ -599,21 +619,21 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
 
         // if no trimming applied, r1 should be identical to or1
         if(r1 != or1 && r1 != NULL) {
-            recycleToPool1(tid, r1);
+            delete r1;
             r1 = NULL;
         }
-        // if no trimming applied, r1 should be identical to or1
+        // if no trimming applied, r2 should be identical to or2
         if(r2 != or2 && r2 != NULL) {
-            recycleToPool2(tid, r2);
+            delete r2;
             r2 = NULL;
         }
 
         if(or1) {
-            recycleToPool1(tid, or1);
+            delete or1;
             or1 = NULL;
         }
         if(or2) {
-            recycleToPool2(tid, or2);
+            delete or2;
             or2 = NULL;
         }
     }
@@ -665,8 +685,6 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
         config->addMergedPairs(mergedCount);
     }
 
-    // stack strings auto-cleanup - no manual delete needed
-
     delete[] leftPack->data;
     delete[] rightPack->data;
     delete leftPack;
@@ -676,7 +694,7 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
 
     return true;
 }
-    
+
 void PairEndProcessor::statInsertSize(Read* r1, Read* r2, OverlapResult& ov, int frontTrimmed1, int frontTrimmed2) {
     int isize = mOptions->insertSizeMax;
     if(ov.overlapped) {
@@ -703,53 +721,138 @@ void PairEndProcessor::readerTask(bool isLeft)
     long lastReported = 0;
     int slept = 0;
     long readNum = 0;
-    bool splitSizeReEvaluated = false;
-    Read** data = new Read*[PACK_SIZE];
-    memset(data, 0, sizeof(Read*)*PACK_SIZE);
     FastqReader* reader = NULL;
-    if(isLeft) {
+    if(isLeft)
         reader = new FastqReader(mOptions->in1, true, mOptions->phred64);
-        reader->setReadPool(mLeftReadPool);
-    }
-    else {
+    else
         reader = new FastqReader(mOptions->in2, true, mOptions->phred64);
-        reader->setReadPool(mRightReadPool);
-    }
 
-    int count=0;
+    char* leftover = NULL;
+    int leftoverLen = 0;
     bool needToBreak = false;
+
     while(true){
         if(shouldStopReading)
             break;
-        Read* read = reader->read();
-        if(!read || needToBreak){
-            // the last pack
-            ReadPack* pack = new ReadPack;
-            pack->data = data;
-            pack->count = count;
 
-            if(isLeft) {
-                mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(pack);
-                mLeftPackReadCounter++;
-            } else {
-                mRightInputLists[mRightPackReadCounter % mOptions->thread]->produce(pack);
-                mRightPackReadCounter++;
-            }
-            data = NULL;
-            if(read) {
-                delete read;
-                read = NULL;
-            }
+        int rawLen = 0;
+        char* rawData = reader->readRawBuffer(rawLen);
+        if (!rawData)
             break;
+
+        // build working buffer: leftover + new raw data
+        char* workBuf;
+        int workLen;
+        if (leftoverLen > 0) {
+            workLen = leftoverLen + rawLen;
+            workBuf = new char[workLen];
+            memcpy(workBuf, leftover, leftoverLen);
+            memcpy(workBuf + leftoverLen, rawData, rawLen);
+            delete[] leftover;
+            leftover = NULL;
+            leftoverLen = 0;
+            delete[] rawData;
+            rawData = NULL;
+        } else {
+            workBuf = rawData;
+            workLen = rawLen;
         }
-        data[count] = read;
-        count++;
-        // configured to process only first N reads
-        if(mOptions->readsToProcess >0 && count + readNum >= mOptions->readsToProcess) {
-            needToBreak = true;
+
+        RawBuffer* buffer = new RawBuffer(workBuf, workLen);
+
+        int pos = 0;
+        int packStart = 0;
+        int recordsInPack = 0;
+        int newlineCount = 0;
+        int lastRecordEnd = 0;
+
+        while (pos < workLen) {
+            const char* nl = (const char*)memchr(workBuf + pos, '\n', workLen - pos);
+            if (!nl)
+                break;
+            pos = (nl - workBuf) + 1;
+            newlineCount++;
+
+            if (newlineCount == 4) {
+                newlineCount = 0;
+                recordsInPack++;
+                lastRecordEnd = pos;
+
+                if (mOptions->readsToProcess > 0 && readNum + recordsInPack >= mOptions->readsToProcess) {
+                    needToBreak = true;
+                    if (recordsInPack > 0) {
+                        RawPack* pack = new RawPack;
+                        pack->buffer = buffer;
+                        pack->offset = packStart;
+                        pack->length = lastRecordEnd - packStart;
+                        pack->readCount = recordsInPack;
+                        buffer->addRef();
+                        if (isLeft) {
+                            mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(pack);
+                            mLeftPackReadCounter++;
+                        } else {
+                            mRightInputLists[mRightPackReadCounter % mOptions->thread]->produce(pack);
+                            mRightPackReadCounter++;
+                        }
+                    }
+                    recordsInPack = 0;
+                    packStart = lastRecordEnd;
+                    break;
+                }
+
+                if (recordsInPack == PACK_SIZE) {
+                    RawPack* pack = new RawPack;
+                    pack->buffer = buffer;
+                    pack->offset = packStart;
+                    pack->length = lastRecordEnd - packStart;
+                    pack->readCount = recordsInPack;
+                    buffer->addRef();
+                    if (isLeft) {
+                        mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(pack);
+                        mLeftPackReadCounter++;
+                    } else {
+                        mRightInputLists[mRightPackReadCounter % mOptions->thread]->produce(pack);
+                        mRightPackReadCounter++;
+                    }
+
+                    readNum += recordsInPack;
+                    recordsInPack = 0;
+                    packStart = lastRecordEnd;
+
+                    if (isLeft) {
+                        while (mLeftPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT) {
+                            slept++;
+                            usleep(100);
+                        }
+                    } else {
+                        while (mRightPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT) {
+                            slept++;
+                            usleep(100);
+                        }
+                    }
+                    if (readNum % (PACK_SIZE * PACK_IN_MEM_LIMIT) == 0 && mLeftWriter) {
+                        while ((mLeftWriter && mLeftWriter->bufferLength() > PACK_IN_MEM_LIMIT) || (mRightWriter && mRightWriter->bufferLength() > PACK_IN_MEM_LIMIT)) {
+                            slept++;
+                            usleep(1000);
+                        }
+                    }
+                }
+            }
         }
-        if(mOptions->verbose && count + readNum >= lastReported + 1000000) {
-            lastReported = count + readNum;
+
+        // Don't emit partial packs mid-stream: carry un-emitted complete
+        // records + incomplete trailing record as leftover to the next buffer.
+        // This keeps L/R pack counts in lockstep for PE mode.
+        if (packStart < workLen && !needToBreak) {
+            leftoverLen = workLen - packStart;
+            leftover = new char[leftoverLen];
+            memcpy(leftover, workBuf + packStart, leftoverLen);
+        }
+
+        buffer->release();
+
+        if (mOptions->verbose && readNum >= lastReported + 1000000) {
+            lastReported = (readNum / 1000000) * 1000000;
             string msg;
             if(isLeft)
                 msg = "Read1: ";
@@ -758,63 +861,47 @@ void PairEndProcessor::readerTask(bool isLeft)
             msg += "loaded " + to_string((lastReported/1000000)) + "M reads";
             loginfo(msg);
         }
-        // a full pack
-        if(count == PACK_SIZE || needToBreak){
-            ReadPack* pack = new ReadPack;
-            pack->data = data;
-            pack->count = count;
-            
-            if(isLeft) {
+
+        if (needToBreak)
+            break;
+    }
+
+    // final leftover
+    if (leftoverLen > 0) {
+        int nlCount = 0;
+        int records = 0;
+        for (int i = 0; i < leftoverLen; i++) {
+            if (leftover[i] == '\n') {
+                nlCount++;
+                if (nlCount == 4) {
+                    nlCount = 0;
+                    records++;
+                }
+            }
+        }
+        if (nlCount == 3)
+            records++;
+        if (records > 0) {
+            RawBuffer* buf = new RawBuffer(leftover, leftoverLen);
+            RawPack* pack = new RawPack;
+            pack->buffer = buf;
+            pack->offset = 0;
+            pack->length = leftoverLen;
+            pack->readCount = records;
+            buf->addRef();
+            if (isLeft) {
                 mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(pack);
                 mLeftPackReadCounter++;
             } else {
                 mRightInputLists[mRightPackReadCounter % mOptions->thread]->produce(pack);
                 mRightPackReadCounter++;
             }
-
-            //re-initialize data for next pack
-            data = new Read*[PACK_SIZE];
-            memset(data, 0, sizeof(Read*)*PACK_SIZE);
-            // if the processor is far behind this reader, sleep and wait to limit memory usage
-            if(isLeft) {
-                while(mLeftPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT){
-                    //cerr<<"sleep"<<endl;
-                    slept++;
-                    usleep(100);
-                }
-            } else {
-                while(mRightPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT){
-                    //cerr<<"sleep"<<endl;
-                    slept++;
-                    usleep(100);
-                }
-            }
-            readNum += count;
-            // if the writer threads are far behind this producer, sleep and wait
-            // check this only when necessary
-            if(readNum % (PACK_SIZE * PACK_IN_MEM_LIMIT) == 0 && mLeftWriter) {
-                while( (mLeftWriter && mLeftWriter->bufferLength() > PACK_IN_MEM_LIMIT) || (mRightWriter && mRightWriter->bufferLength() > PACK_IN_MEM_LIMIT) ){
-                    slept++;
-                    usleep(1000);
-                }
-            }
-            // reset count to 0
-            count = 0;
-            // re-evaluate split size
-            // TODO: following codes are commented since it may cause threading related conflicts in some systems
-            /*if(mOptions->split.needEvaluation && !splitSizeReEvaluated && readNum >= mOptions->split.size) {
-                splitSizeReEvaluated = true;
-                // greater than the initial evaluation
-                if(readNum >= 1024*1024) {
-                    size_t bytesRead;
-                    size_t bytesTotal;
-                    reader.getBytes(bytesRead, bytesTotal);
-                    mOptions->split.size *=  (double)bytesTotal / ((double)bytesRead * (double) mOptions->split.number);
-                    if(mOptions->split.size <= 0)
-                        mOptions->split.size = 1;
-                }
-            }*/
+            buf->release();
+        } else {
+            delete[] leftover;
         }
+        leftover = NULL;
+        leftoverLen = 0;
     }
 
     for(int t=0; t<mOptions->thread; t++) {
@@ -834,11 +921,7 @@ void PairEndProcessor::readerTask(bool isLeft)
             loginfo("Read2: loading completed with " + to_string(mRightPackReadCounter) + " packs");
         }
     }
-    
 
-    // if the last data initialized is not used, free it
-    if(data != NULL)
-        delete[] data;
     if(reader != NULL)
         delete reader;
 }
@@ -850,7 +933,6 @@ void PairEndProcessor::interleavedReaderTask()
     long lastReported = 0;
     int slept = 0;
     long readNum = 0;
-    bool splitSizeReEvaluated = false;
     Read** dataLeft = new Read*[PACK_SIZE];
     Read** dataRight = new Read*[PACK_SIZE];
     memset(dataLeft, 0, sizeof(Read*)*PACK_SIZE);
@@ -861,15 +943,54 @@ void PairEndProcessor::interleavedReaderTask()
     ReadPair* pair = new ReadPair();
     while(true){
         reader.read(pair);
-        // TODO: put needToBreak here is just a WAR for resolve some unidentified dead lock issue 
         if(pair->eof() || needToBreak){
-            // the last pack
-            ReadPack* packLeft = new ReadPack;
-            ReadPack* packRight = new ReadPack;
-            packLeft->data = dataLeft;
-            packRight->data = dataRight;
-            packLeft->count = count;
-            packRight->count = count;
+            // Wrap parsed reads into RawPack via serialization
+            // For interleaved mode, we serialize Read objects back to raw text
+            auto serializeReads = [](Read** reads, int count) -> RawPack* {
+                if (count == 0) {
+                    // empty pack
+                    char* emptyBuf = new char[1];
+                    emptyBuf[0] = '\0';
+                    RawBuffer* buf = new RawBuffer(emptyBuf, 0);
+                    RawPack* pack = new RawPack;
+                    pack->buffer = buf;
+                    pack->offset = 0;
+                    pack->length = 0;
+                    pack->readCount = 0;
+                    buf->addRef();
+                    buf->release();
+                    return pack;
+                }
+                string raw;
+                raw.reserve(count * 320);
+                for (int i = 0; i < count; i++) {
+                    raw += *reads[i]->mName;
+                    raw += '\n';
+                    raw += *reads[i]->mSeq;
+                    raw += '\n';
+                    raw += *reads[i]->mStrand;
+                    raw += '\n';
+                    raw += *reads[i]->mQuality;
+                    raw += '\n';
+                    delete reads[i];
+                }
+                delete[] reads;
+                int len = raw.size();
+                char* data = new char[len];
+                memcpy(data, raw.c_str(), len);
+                RawBuffer* buf = new RawBuffer(data, len);
+                RawPack* pack = new RawPack;
+                pack->buffer = buf;
+                pack->offset = 0;
+                pack->length = len;
+                pack->readCount = count;
+                buf->addRef();
+                buf->release();
+                return pack;
+            };
+
+            RawPack* packLeft = serializeReads(dataLeft, count);
+            RawPack* packRight = serializeReads(dataRight, count);
 
             mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(packLeft);
             mLeftPackReadCounter++;
@@ -884,7 +1005,6 @@ void PairEndProcessor::interleavedReaderTask()
         dataLeft[count] = pair->mLeft;
         dataRight[count] = pair->mRight;
         count++;
-        // configured to process only first N reads
         if(mOptions->readsToProcess >0 && count + readNum >= mOptions->readsToProcess) {
             needToBreak = true;
         }
@@ -893,14 +1013,38 @@ void PairEndProcessor::interleavedReaderTask()
             string msg = "loaded " + to_string((lastReported/1000000)) + "M read pairs";
             loginfo(msg);
         }
-        // a full pack
         if(count == PACK_SIZE || needToBreak){
-            ReadPack* packLeft = new ReadPack;
-            ReadPack* packRight = new ReadPack;
-            packLeft->data = dataLeft;
-            packRight->data = dataRight;
-            packLeft->count = count;
-            packRight->count = count;
+            auto serializeReads = [](Read** reads, int count) -> RawPack* {
+                string raw;
+                raw.reserve(count * 320);
+                for (int i = 0; i < count; i++) {
+                    raw += *reads[i]->mName;
+                    raw += '\n';
+                    raw += *reads[i]->mSeq;
+                    raw += '\n';
+                    raw += *reads[i]->mStrand;
+                    raw += '\n';
+                    raw += *reads[i]->mQuality;
+                    raw += '\n';
+                    delete reads[i];
+                }
+                delete[] reads;
+                int len = raw.size();
+                char* data = new char[len];
+                memcpy(data, raw.c_str(), len);
+                RawBuffer* buf = new RawBuffer(data, len);
+                RawPack* pack = new RawPack;
+                pack->buffer = buf;
+                pack->offset = 0;
+                pack->length = len;
+                pack->readCount = count;
+                buf->addRef();
+                buf->release();
+                return pack;
+            };
+
+            RawPack* packLeft = serializeReads(dataLeft, count);
+            RawPack* packRight = serializeReads(dataRight, count);
 
             mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(packLeft);
             mLeftPackReadCounter++;
@@ -908,42 +1052,22 @@ void PairEndProcessor::interleavedReaderTask()
             mRightInputLists[mRightPackReadCounter % mOptions->thread]->produce(packRight);
             mRightPackReadCounter++;
 
-            //re-initialize data for next pack
             dataLeft = new Read*[PACK_SIZE];
             dataRight = new Read*[PACK_SIZE];
             memset(dataLeft, 0, sizeof(Read*)*PACK_SIZE);
             memset(dataRight, 0, sizeof(Read*)*PACK_SIZE);
-            // if the consumer is far behind this producer, sleep and wait to limit memory usage
             while(mLeftPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT){
-                //cerr<<"sleep"<<endl;
                 slept++;
                 usleep(100);
             }
             readNum += count;
-            // if the writer threads are far behind this producer, sleep and wait
-            // check this only when necessary
             if(readNum % (PACK_SIZE * PACK_IN_MEM_LIMIT) == 0 && mLeftWriter) {
                 while( (mLeftWriter && mLeftWriter->bufferLength() > PACK_IN_MEM_LIMIT) || (mRightWriter && mRightWriter->bufferLength() > PACK_IN_MEM_LIMIT) ){
                     slept++;
                     usleep(1000);
                 }
             }
-            // reset count to 0
             count = 0;
-            // re-evaluate split size
-            // TODO: following codes are commented since it may cause threading related conflicts in some systems
-            /*if(mOptions->split.needEvaluation && !splitSizeReEvaluated && readNum >= mOptions->split.size) {
-                splitSizeReEvaluated = true;
-                // greater than the initial evaluation
-                if(readNum >= 1024*1024) {
-                    size_t bytesRead;
-                    size_t bytesTotal;
-                    reader.mLeft->getBytes(bytesRead, bytesTotal);
-                    mOptions->split.size *=  (double)bytesTotal / ((double)bytesRead * (double) mOptions->split.number);
-                    if(mOptions->split.size <= 0)
-                        mOptions->split.size = 1;
-                }
-            }*/
         }
     }
 
@@ -961,7 +1085,6 @@ void PairEndProcessor::interleavedReaderTask()
     mLeftReaderFinished = true;
     mRightReaderFinished = true;
 
-    // if the last data initialized is not used, free it
     if(dataLeft != NULL)
         delete[] dataLeft;
     if(dataRight != NULL)
@@ -970,15 +1093,17 @@ void PairEndProcessor::interleavedReaderTask()
 
 void PairEndProcessor::processorTask(ThreadConfig* config)
 {
-    SingleProducerSingleConsumerList<ReadPack*>* inputLeft = config->getLeftInput();
-    SingleProducerSingleConsumerList<ReadPack*>* inputRight = config->getRightInput();
+    SingleProducerSingleConsumerList<RawPack*>* inputLeft = config->getLeftInput();
+    SingleProducerSingleConsumerList<RawPack*>* inputRight = config->getRightInput();
     while(true) {
         if(config->canBeStopped()){
             break;
         }
         while(inputLeft->canBeConsumed() && inputRight->canBeConsumed()) {
-            ReadPack* dataLeft = inputLeft->consume();
-            ReadPack* dataRight = inputRight->consume();
+            RawPack* rawLeft = inputLeft->consume();
+            RawPack* rawRight = inputRight->consume();
+            ReadPack* dataLeft = parseRawPack(rawLeft);
+            ReadPack* dataRight = parseRawPack(rawRight);
             processPairEnd(dataLeft, dataRight, config);
         }
         if(inputLeft->isProducerFinished() && !inputLeft->canBeConsumed()) {
@@ -1014,7 +1139,7 @@ void PairEndProcessor::processorTask(ThreadConfig* config)
         if(mOverlappedWriter)
             mOverlappedWriter->setInputCompleted();
     }
-    
+
     if(mOptions->verbose) {
         string msg = "thread " + to_string(config->getThreadId() + 1) + " finished";
         loginfo(msg);

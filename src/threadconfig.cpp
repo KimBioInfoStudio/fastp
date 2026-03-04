@@ -64,11 +64,11 @@ void ThreadConfig::cleanup() {
 }
 
 
-void ThreadConfig::setInputList(SingleProducerSingleConsumerList<ReadPack*>* list) {
+void ThreadConfig::setInputList(SingleProducerSingleConsumerList<RawPack*>* list) {
     mLeftInputList = list;
 }
 
-void ThreadConfig::setInputListPair(SingleProducerSingleConsumerList<ReadPack*>* left, SingleProducerSingleConsumerList<ReadPack*>* right) {
+void ThreadConfig::setInputListPair(SingleProducerSingleConsumerList<RawPack*>* left, SingleProducerSingleConsumerList<RawPack*>* right) {
     mLeftInputList = left;
     mRightInputList = right;
 }

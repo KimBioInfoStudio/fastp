@@ -27,8 +27,6 @@ SingleEndProcessor::SingleEndProcessor(Options* opt){
 
     mPackReadCounter = 0;
     mPackProcessedCounter = 0;
-
-    mReadPool = new ReadPool(mOptions);
 }
 
 SingleEndProcessor::~SingleEndProcessor() {
@@ -36,10 +34,6 @@ SingleEndProcessor::~SingleEndProcessor() {
     if(mDuplicate) {
         delete mDuplicate;
         mDuplicate = NULL;
-    }
-    if(mReadPool) {
-        delete mReadPool;
-        mReadPool = NULL;
     }
     delete[] mInputLists;
 }
@@ -76,11 +70,11 @@ bool SingleEndProcessor::process(){
     if(!mOptions->split.enabled)
         initOutput();
 
-    mInputLists = new SingleProducerSingleConsumerList<ReadPack*>*[mOptions->thread];
+    mInputLists = new SingleProducerSingleConsumerList<RawPack*>*[mOptions->thread];
 
     ThreadConfig** configs = new ThreadConfig*[mOptions->thread];
     for(int t=0; t<mOptions->thread; t++){
-        mInputLists[t] = new SingleProducerSingleConsumerList<ReadPack*>();
+        mInputLists[t] = new SingleProducerSingleConsumerList<RawPack*>();
         configs[t] = new ThreadConfig(mOptions, t, false);
         configs[t]->setInputList(mInputLists[t]);
         initConfig(configs[t]);
@@ -187,12 +181,6 @@ bool SingleEndProcessor::process(){
     return true;
 }
 
-void SingleEndProcessor::recycleToPool(int tid, Read* r) {
-    // failed to recycle, then delete it
-    if(!mReadPool->input(tid, r))
-        delete r;
-}
-
 bool SingleEndProcessor::processSingleEnd(ReadPack* pack, ThreadConfig* config){
     // build output on stack strings, move to heap only when handing off to writers
     string outstr, failedOut;
@@ -218,7 +206,7 @@ bool SingleEndProcessor::processSingleEnd(ReadPack* pack, ThreadConfig* config){
 
         // filter by index
         if(mOptions->indexFilter.enabled && mFilter->filterByIndex(or1)) {
-            recycleToPool(tid, or1);
+            delete or1;
             continue;
         }
 
@@ -286,10 +274,10 @@ bool SingleEndProcessor::processSingleEnd(ReadPack* pack, ThreadConfig* config){
             }
         }
 
-        recycleToPool(tid, or1);
+        delete or1;
         // if no trimming applied, r1 should be identical to or1
         if(r1 != or1 && r1 != NULL)
-            recycleToPool(tid, r1);
+            delete r1;
     }
 
     if(mOptions->split.enabled) {
@@ -310,14 +298,55 @@ bool SingleEndProcessor::processSingleEnd(ReadPack* pack, ThreadConfig* config){
     else
         config->markProcessed(pack->count);
 
-    // stack strings auto-cleanup - no manual delete needed
-
-    delete pack->data;
+    delete[] pack->data;
     delete pack;
 
     mPackProcessedCounter++;
 
     return true;
+}
+
+ReadPack* SingleEndProcessor::parseRawPack(RawPack* rawPack) {
+    int count = rawPack->readCount;
+    Read** data = new Read*[count];
+    char* buf = rawPack->buffer->data + rawPack->offset;
+    int len = rawPack->length;
+    int pos = 0;
+    bool phred64 = mOptions->phred64;
+
+    for (int i = 0; i < count; i++) {
+        string* name = new string();
+        string* seq = new string();
+        string* strand = new string();
+        string* qual = new string();
+
+        // parse 4 lines per FASTQ record
+        string* fields[4] = {name, seq, strand, qual};
+        for (int f = 0; f < 4; f++) {
+            const char* nl = (const char*)memchr(buf + pos, '\n', len - pos);
+            int lineEnd;
+            if (nl)
+                lineEnd = nl - buf;
+            else
+                lineEnd = len;
+            int lineLen = lineEnd - pos;
+            // strip \r
+            if (lineLen > 0 && buf[pos + lineLen - 1] == '\r')
+                lineLen--;
+            fields[f]->assign(buf + pos, lineLen);
+            pos = (nl ? lineEnd + 1 : lineEnd);
+        }
+
+        data[i] = new Read(name, seq, strand, qual, phred64);
+    }
+
+    rawPack->buffer->release();
+    delete rawPack;
+
+    ReadPack* pack = new ReadPack;
+    pack->data = data;
+    pack->count = count;
+    return pack;
 }
 
 void SingleEndProcessor::readerTask()
@@ -327,108 +356,205 @@ void SingleEndProcessor::readerTask()
     long lastReported = 0;
     int slept = 0;
     long readNum = 0;
-    bool splitSizeReEvaluated = false;
-    Read** data = new Read*[PACK_SIZE];
-    memset(data, 0, sizeof(Read*)*PACK_SIZE);
     FastqReader reader(mOptions->in1, true, mOptions->phred64);
-    reader.setReadPool(mReadPool);
-    int count=0;
+
+    // leftover from previous buffer (partial record at buffer boundary)
+    char* leftover = NULL;
+    int leftoverLen = 0;
+
     bool needToBreak = false;
     while(true){
-        Read* read = reader.read();
-        if(!read || needToBreak){
-            // the last pack
-            ReadPack* pack = new ReadPack;
-            pack->data = data;
-            pack->count = count;
-            mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
-            mPackReadCounter++;
-            data = NULL;
-            if(read) {
-                delete read;
-                read = NULL;
-            }
+        int rawLen = 0;
+        char* rawData = reader.readRawBuffer(rawLen);
+        if (!rawData) {
+            // no more data from reader; leftover handled after loop
             break;
         }
-        data[count] = read;
-        count++;
-        // configured to process only first N reads
-        if(mOptions->readsToProcess >0 && count + readNum >= mOptions->readsToProcess) {
-            needToBreak = true;
+
+        // build working buffer: leftover + new raw data
+        char* workBuf;
+        int workLen;
+        if (leftoverLen > 0) {
+            workLen = leftoverLen + rawLen;
+            workBuf = new char[workLen];
+            memcpy(workBuf, leftover, leftoverLen);
+            memcpy(workBuf + leftoverLen, rawData, rawLen);
+            delete[] leftover;
+            leftover = NULL;
+            leftoverLen = 0;
+            delete[] rawData;
+            rawData = NULL;
+        } else {
+            workBuf = rawData;
+            workLen = rawLen;
         }
-        if(mOptions->verbose && count + readNum >= lastReported + 1000000) {
-            lastReported = count + readNum;
-            string msg = "loaded " + to_string((lastReported/1000000)) + "M reads";
-            loginfo(msg);
+
+        // Create RawBuffer to own workBuf
+        RawBuffer* buffer = new RawBuffer(workBuf, workLen);
+
+        // Scan for record boundaries: 4 newlines = 1 FASTQ record
+        int pos = 0;
+        int packStart = 0;
+        int recordsInPack = 0;
+        int newlineCount = 0;
+        int lastRecordEnd = 0;
+
+        while (pos < workLen) {
+            const char* nl = (const char*)memchr(workBuf + pos, '\n', workLen - pos);
+            if (!nl)
+                break;
+            pos = (nl - workBuf) + 1;
+            newlineCount++;
+
+            if (newlineCount == 4) {
+                // complete record
+                newlineCount = 0;
+                recordsInPack++;
+                lastRecordEnd = pos;
+
+                // check readsToProcess limit
+                if (mOptions->readsToProcess > 0 && readNum + recordsInPack >= mOptions->readsToProcess) {
+                    needToBreak = true;
+                    // emit what we have
+                    if (recordsInPack > 0) {
+                        RawPack* pack = new RawPack;
+                        pack->buffer = buffer;
+                        pack->offset = packStart;
+                        pack->length = lastRecordEnd - packStart;
+                        pack->readCount = recordsInPack;
+                        buffer->addRef();
+                        mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
+                        mPackReadCounter++;
+                    }
+                    recordsInPack = 0;
+                    packStart = lastRecordEnd;
+                    break;
+                }
+
+                if (recordsInPack == PACK_SIZE) {
+                    RawPack* pack = new RawPack;
+                    pack->buffer = buffer;
+                    pack->offset = packStart;
+                    pack->length = lastRecordEnd - packStart;
+                    pack->readCount = recordsInPack;
+                    buffer->addRef();
+                    mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
+                    mPackReadCounter++;
+
+                    readNum += recordsInPack;
+                    recordsInPack = 0;
+                    packStart = lastRecordEnd;
+
+                    // backpressure
+                    while (mPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT) {
+                        slept++;
+                        usleep(100);
+                    }
+                    // writer backpressure
+                    if (readNum % (PACK_SIZE * PACK_IN_MEM_LIMIT) == 0 && mLeftWriter) {
+                        while (mLeftWriter->bufferLength() > PACK_IN_MEM_LIMIT) {
+                            slept++;
+                            usleep(1000);
+                        }
+                    }
+                }
+            }
         }
-        // a full pack
-        if(count == PACK_SIZE || needToBreak){
-            ReadPack* pack = new ReadPack;
-            pack->data = data;
-            pack->count = count;
+
+        // Handle remaining complete records in this buffer
+        if (recordsInPack > 0 && !needToBreak) {
+            RawPack* pack = new RawPack;
+            pack->buffer = buffer;
+            pack->offset = packStart;
+            pack->length = lastRecordEnd - packStart;
+            pack->readCount = recordsInPack;
+            buffer->addRef();
             mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
             mPackReadCounter++;
-            //re-initialize data for next pack
-            data = new Read*[PACK_SIZE];
-            memset(data, 0, sizeof(Read*)*PACK_SIZE);
-            // if the processor is far behind this reader, sleep and wait to limit memory usage
-            while( mPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT){
-                //cerr<<"sleep"<<endl;
+            readNum += recordsInPack;
+            packStart = lastRecordEnd;
+
+            while (mPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT) {
                 slept++;
                 usleep(100);
             }
-            readNum += count;
-            // if the writer threads are far behind this reader, sleep and wait
-            // check this only when necessary
-            if(readNum % (PACK_SIZE * PACK_IN_MEM_LIMIT) == 0 && mLeftWriter) {
-                while(mLeftWriter->bufferLength() > PACK_IN_MEM_LIMIT) {
-                    slept++;
-                    usleep(1000);
+        }
+
+        // Save leftover (partial record at end of buffer)
+        if (lastRecordEnd < workLen && !needToBreak) {
+            leftoverLen = workLen - lastRecordEnd;
+            leftover = new char[leftoverLen];
+            memcpy(leftover, workBuf + lastRecordEnd, leftoverLen);
+        }
+
+        // Release reader's reference to buffer
+        buffer->release();
+
+        if (mOptions->verbose && readNum >= lastReported + 1000000) {
+            lastReported = (readNum / 1000000) * 1000000;
+            string msg = "loaded " + to_string((lastReported/1000000)) + "M reads";
+            loginfo(msg);
+        }
+
+        if (needToBreak)
+            break;
+    }
+
+    // Handle final leftover as last pack (incomplete buffer at EOF)
+    if (leftoverLen > 0) {
+        // Count records in leftover
+        int nlCount = 0;
+        int records = 0;
+        for (int i = 0; i < leftoverLen; i++) {
+            if (leftover[i] == '\n') {
+                nlCount++;
+                if (nlCount == 4) {
+                    nlCount = 0;
+                    records++;
                 }
             }
-            // reset count to 0
-            count = 0;
-            // re-evaluate split size
-            // TODO: following codes are commented since it may cause threading related conflicts in some systems
-            /*if(mOptions->split.needEvaluation && !splitSizeReEvaluated && readNum >= mOptions->split.size) {
-                splitSizeReEvaluated = true;
-                // greater than the initial evaluation
-                if(readNum >= 1024*1024) {
-                    size_t bytesRead;
-                    size_t bytesTotal;
-                    reader.getBytes(bytesRead, bytesTotal);
-                    mOptions->split.size *=  (double)bytesTotal / ((double)bytesRead * (double) mOptions->split.number);
-                    if(mOptions->split.size <= 0)
-                        mOptions->split.size = 1;
-                }
-            }*/
         }
+        // Handle file without trailing newline
+        if (nlCount == 3) {
+            records++;
+        }
+        if (records > 0) {
+            RawBuffer* buf = new RawBuffer(leftover, leftoverLen);
+            RawPack* pack = new RawPack;
+            pack->buffer = buf;
+            pack->offset = 0;
+            pack->length = leftoverLen;
+            pack->readCount = records;
+            buf->addRef();
+            mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
+            mPackReadCounter++;
+            buf->release();
+        } else {
+            delete[] leftover;
+        }
+        leftover = NULL;
+        leftoverLen = 0;
     }
 
     for(int t=0; t<mOptions->thread; t++)
         mInputLists[t]->setProducerFinished();
 
-    //std::unique_lock<std::mutex> lock(mRepo.readCounterMtx);
     mReaderFinished = true;
     if(mOptions->verbose) {
         loginfo("Loading completed with " + to_string(mPackReadCounter) + " packs");
     }
-    //lock.unlock();
-
-    // if the last data initialized is not used, free it
-    if(data != NULL)
-        delete[] data;
 }
 
 void SingleEndProcessor::processorTask(ThreadConfig* config)
 {
-    SingleProducerSingleConsumerList<ReadPack*>* input = config->getLeftInput();
+    SingleProducerSingleConsumerList<RawPack*>* input = config->getLeftInput();
     while(true) {
         if(config->canBeStopped()){
             break;
         }
         while(input->canBeConsumed()) {
-            ReadPack* data = input->consume();
+            RawPack* rawData = input->consume();
+            ReadPack* data = parseRawPack(rawData);
             processSingleEnd(data, config);
         }
         if(input->isProducerFinished()) {

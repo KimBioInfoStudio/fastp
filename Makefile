@@ -14,8 +14,10 @@ TARGET := fastp
 
 BIN_TARGET := ${TARGET}
 
+GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
 CXX ?= g++
-CXXFLAGS := -std=c++11 -pthread -g -O3 -MD -MP -I. -I${DIR_INC} $(foreach includedir,$(INCLUDE_DIRS),-I$(includedir)) ${CXXFLAGS}
+CXXFLAGS := -std=c++11 -pthread -g -O3 -MD -MP -I. -I${DIR_INC} $(foreach includedir,$(INCLUDE_DIRS),-I$(includedir)) -DGIT_COMMIT=\"$(GIT_COMMIT)\" ${CXXFLAGS}
 LIBS := -lisal -ldeflate -lhwy -lpthread
 
 UNAME_S := $(shell uname -s)

@@ -16,11 +16,8 @@
 #include "writerthread.h"
 #include "duplicate.h"
 #include "singleproducersingleconsumerlist.h"
-#include "readpool.h"
 
 using namespace std;
-
-typedef struct ReadRepository ReadRepository;
 
 class SingleEndProcessor{
 public:
@@ -30,13 +27,13 @@ public:
 
 private:
     bool processSingleEnd(ReadPack* pack, ThreadConfig* config);
+    ReadPack* parseRawPack(RawPack* rawPack);
     void readerTask();
     void processorTask(ThreadConfig* config);
     void initConfig(ThreadConfig* config);
     void initOutput();
     void closeOutput();
     void writerTask(WriterThread* config);
-    void recycleToPool(int tid, Read* r);
 
 private:
     Options* mOptions;
@@ -47,10 +44,9 @@ private:
     WriterThread* mLeftWriter;
     WriterThread* mFailedWriter;
     Duplicate* mDuplicate;
-    SingleProducerSingleConsumerList<ReadPack*>** mInputLists;
+    SingleProducerSingleConsumerList<RawPack*>** mInputLists;
     size_t mPackReadCounter;
     atomic_long mPackProcessedCounter;
-    ReadPool* mReadPool;
 };
 
 

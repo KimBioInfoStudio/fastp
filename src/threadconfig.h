@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string>
 #include <vector>
+#include "read.h"
 #include "stats.h"
 #include "writer.h"
 #include "options.h"
@@ -40,10 +41,10 @@ public:
     void cleanup();
 
     // input list
-    void setInputList(SingleProducerSingleConsumerList<ReadPack*>* list);
-    void setInputListPair(SingleProducerSingleConsumerList<ReadPack*>* left, SingleProducerSingleConsumerList<ReadPack*>* right);
-    SingleProducerSingleConsumerList<ReadPack*>* getLeftInput(){return mLeftInputList;}
-    SingleProducerSingleConsumerList<ReadPack*>* getRightInput(){return mRightInputList;}
+    void setInputList(SingleProducerSingleConsumerList<RawPack*>* list);
+    void setInputListPair(SingleProducerSingleConsumerList<RawPack*>* left, SingleProducerSingleConsumerList<RawPack*>* right);
+    SingleProducerSingleConsumerList<RawPack*>* getLeftInput(){return mLeftInputList;}
+    SingleProducerSingleConsumerList<RawPack*>* getRightInput(){return mRightInputList;}
 
 private:
     void deleteWriter();
@@ -58,8 +59,8 @@ private:
     Writer* mWriter2;
     Options* mOptions;
     FilterResult* mFilterResult;
-    SingleProducerSingleConsumerList<ReadPack*>* mLeftInputList;
-    SingleProducerSingleConsumerList<ReadPack*>* mRightInputList;
+    SingleProducerSingleConsumerList<RawPack*>* mLeftInputList;
+    SingleProducerSingleConsumerList<RawPack*>* mRightInputList;
 
     // for spliting output
     int mThreadId;

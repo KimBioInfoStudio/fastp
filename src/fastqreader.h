@@ -36,8 +36,6 @@ SOFTWARE.
 #else
 #include "igzip_lib.h"
 #endif
-#include "readpool.h"
-
 class FastqReader{
 public:
 	FastqReader(string filename, bool hasQuality = true, bool phred64=false);
@@ -51,7 +49,9 @@ public:
 	Read* read();
 	bool eof();
 	bool hasNoLineBreakAtEnd();
-	void setReadPool(ReadPool* rp);
+
+	// Zero-copy buffer handoff: swaps internal buffer, returns filled one
+	char* readRawBuffer(int& dataLen);
 
 public:
 	static bool isZipFastq(string filename);
@@ -86,7 +86,6 @@ private:
 	long mCounter;
 	bool mHasQuality;
 	bool mPhred64;
-    ReadPool* mReadPool;
 
 };
 
