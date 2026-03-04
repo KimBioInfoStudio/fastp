@@ -13,6 +13,13 @@
 
 using namespace std;
 
+static constexpr int OFFSET_RING_SIZE = 512;
+
+struct alignas(64) OffsetSlot {
+    std::atomic<size_t> cumulative_offset{0};
+    std::atomic<size_t> published_seq{SIZE_MAX};
+};
+
 class WriterThread{
 public:
     WriterThread(Options* opt, string filename, bool isSTDOUT = false);
@@ -30,9 +37,12 @@ public:
 
     long bufferLength() {return mBufferLength;};
     string getFilename() {return mFilename;}
+    bool isPwriteMode() {return mPwriteMode;}
 
 private:
     void deleteWriter();
+    void inputPwrite(int tid, string* data);
+    void setInputCompletedPwrite();
 
 private:
     Writer* mWriter1;
@@ -47,6 +57,12 @@ private:
     bool mPreCompressed;
     int mIsalLevel;
     string* mAccumBuf;  // per-thread accumulation for flight batching
+
+    // pwrite parallel write mode
+    bool mPwriteMode;
+    int mFd;
+    OffsetSlot* mOffsetRing;
+    size_t* mNextSeq;  // per-worker pack sequence counter
 };
 
 #endif
