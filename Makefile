@@ -21,20 +21,16 @@ CXXFLAGS := -std=c++11 -pthread -g -O3 -MD -MP -I. -I${DIR_INC} $(foreach includ
 LIBS := -lisal -ldeflate -lhwy -lpthread
 
 UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Linux)
-  # Linux: fully static binary
-  LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) -static -Wl,--no-as-needed -pthread $(LIBS) $(LD_FLAGS)
-else
-  # macOS: link 3rd-party libs statically via .a when available, fallback to dynamic
-  FIND_STATIC = $(firstword $(foreach d,$(LIBRARY_DIRS),$(wildcard $(d)/lib$(1).a)) $(wildcard /usr/local/lib/lib$(1).a /opt/homebrew/lib/lib$(1).a))
-  STATIC_LIBS :=
-  DYNAMIC_LIBS :=
-  $(foreach lib,isal deflate hwy,\
-    $(if $(call FIND_STATIC,$(lib)),\
-      $(eval STATIC_LIBS += $(call FIND_STATIC,$(lib))),\
-      $(eval DYNAMIC_LIBS += -l$(lib))))
-  LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(STATIC_LIBS) $(DYNAMIC_LIBS) -lpthread $(LD_FLAGS)
-endif
+# Link 3rd-party libs statically via .a when available, fallback to dynamic.
+# Avoids -static on AArch64 Linux where ISA-L asm has relocation issues.
+FIND_STATIC = $(firstword $(foreach d,$(LIBRARY_DIRS),$(wildcard $(d)/lib$(1).a)) $(wildcard /usr/local/lib/lib$(1).a /opt/homebrew/lib/lib$(1).a))
+STATIC_LIBS :=
+DYNAMIC_LIBS :=
+$(foreach lib,isal deflate hwy,\
+  $(if $(call FIND_STATIC,$(lib)),\
+    $(eval STATIC_LIBS += $(call FIND_STATIC,$(lib))),\
+    $(eval DYNAMIC_LIBS += -l$(lib))))
+LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(STATIC_LIBS) $(DYNAMIC_LIBS) -lpthread $(LD_FLAGS)
 
 
 ${BIN_TARGET}:${OBJ}
