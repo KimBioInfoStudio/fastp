@@ -30,11 +30,6 @@ SOFTWARE.
 #include "common.h"
 #include <iostream>
 #include <fstream>
-#if __has_include(<libdeflate.h>)
-#include <libdeflate.h>
-#else
-#include "libdeflate.h"
-#endif
 #include "options.h"
 #include <stdio.h>
 
@@ -42,6 +37,7 @@ using namespace std;
 
 class Writer{
 public:
+	class Backend;
 	Writer(Options* opt, string filename, int compression, bool isSTDOUT = false, bool preCompressed = false);
 	~Writer();
 	bool isZipped();
@@ -61,10 +57,9 @@ private:
 
 private:
 	string mFilename;
-	libdeflate_compressor* mCompressor;
-	//ofstream* mOutStream;
 	FILE* mFP;
-	bool mZipped;
+	Backend* mBackend;
+	bool mCompressed;
 	int mCompression;
 	bool haveToClose;
 	char* mBuffer;

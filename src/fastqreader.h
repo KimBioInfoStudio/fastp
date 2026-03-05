@@ -31,11 +31,9 @@ SOFTWARE.
 #include "common.h"
 #include <iostream>
 #include <fstream>
-#if __has_include(<isa-l/igzip_lib.h>)
-#include <isa-l/igzip_lib.h>
-#else
-#include "igzip_lib.h"
-#endif
+
+class FastqRawReaderBase;
+
 class FastqReader{
 public:
 	FastqReader(string filename, bool hasQuality = true, bool phred64=false, int workerThreads=0);
@@ -64,24 +62,15 @@ private:
 	void getLine(string* line);
 	void clearLineBreaks(char* line);
 	void readToBuf();
-	void readToBufIgzip();
 	bool bufferFinished();
 
 private:
 	string mFilename;
-	struct isal_gzip_header mGzipHeader;
-	struct inflate_state mGzipState;
-	unsigned char *mGzipInputBuffer;
-	unsigned char *mGzipOutputBuffer;
-	size_t mGzipInputBufferSize;
-	size_t mGzipOutputBufferSize;
-	size_t mGzipInputUsedBytes;
-	FILE* mFile;
+	FastqRawReaderBase* mRawReader;
 	bool mZipped;
 	char* mFastqBuf;
 	int mBufDataLen;
 	int mBufUsedLen;
-	bool mStdinMode;
 	bool mHasNoLineBreakAtEnd;
 	long mCounter;
 	bool mHasQuality;

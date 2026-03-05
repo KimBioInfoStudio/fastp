@@ -49,7 +49,7 @@ WriterThread::WriterThread(Options* opt, string filename, bool isSTDOUT){
         mIsalLevel = 3;
 
     // pwrite mode: multi-threaded file output (not STDOUT, not single-threaded)
-    mPwriteMode = !isSTDOUT && mOptions->thread > 1;
+    mPwriteMode = !isSTDOUT && mOptions->thread > 1 && !ends_with(filename, ".zst");
     mFd = -1;
     mOffsetRing = NULL;
     mNextSeq = NULL;

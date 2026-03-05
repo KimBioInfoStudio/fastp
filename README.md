@@ -189,7 +189,7 @@ Then open `fastp.trace.json` in `chrome://trace` to inspect `total / busy / gap.
 * for SE data, you only have to specify read1 input by `-i` or `--in1`, and specify read1 output by `-o` or `--out1`.
 * for PE data, you should also specify read2 input by `-I` or `--in2`, and specify read2 output by `-O` or `--out2`.
 * if you don't specify the output file names, no output files will be written, but the QC will still be done for both data before and after filtering.
-* the output will be gzip-compressed if its file name ends with `.gz`
+* the output will be compressed if its file name ends with `.gz` (gzip) or `.zst` (zstd)
 ## output to STDOUT
 `fastp` supports streaming the passing-filter reads to STDOUT, so that it can be passed to other compressors like `bzip2`, or be passed to aligners like `bwa` and `bowtie2`.
 * specify `--stdout` to enable this mode to stream output to STDOUT
@@ -448,7 +448,7 @@ options:
       --merged_out                     in the merging mode, specify the file name to store merged output, or specify --stdout to stream the merged output (string [=])
       --include_unmerged               in the merging mode, write the unmerged or unpaired reads to the file specified by --merge. Disabled by default.
   -6, --phred64                      indicate the input is using phred64 scoring (it'll be converted to phred33, so the output will still be phred33)
-  -z, --compression                  compression level for gzip output (1 ~ 9). 1 is fastest, 9 is smallest, default is 4. (int [=4])
+  -z, --compression                  compression level for compressed output (gzip/zstd, 1 ~ 9). 1 is fastest, 9 is smallest, default is 4. (int [=4])
       --stdin                          input from STDIN. If the STDIN is interleaved paired-end FASTQ, please also add --interleaved_in.
       --stdout                         output passing-filters reads to STDOUT. This option will result in interleaved FASTQ output for paired-end input. Disabled by default.
       --interleaved_in                 indicate that <in1> is an interleaved FASTQ which contains both read1 and read2. Disabled by default.

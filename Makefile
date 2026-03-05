@@ -26,7 +26,7 @@ UNAME_S := $(shell uname -s)
 # Require static linkage for non-system third-party libs.
 # Keep only system dynamic libs in final binary.
 FIND_STATIC = $(firstword $(foreach d,$(LIBRARY_DIRS),$(wildcard $(d)/lib$(1).a)) $(wildcard /usr/local/lib/lib$(1).a /opt/homebrew/lib/lib$(1).a))
-REQUIRED_STATIC_LIBS := isal deflate hwy
+REQUIRED_STATIC_LIBS := isal deflate hwy zstd
 STATIC_LIBS :=
 $(foreach lib,$(REQUIRED_STATIC_LIBS),\
   $(if $(call FIND_STATIC,$(lib)),\
