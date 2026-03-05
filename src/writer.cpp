@@ -25,6 +25,8 @@ SOFTWARE.
 #include "writer.h"
 #include "util.h"
 #include <string.h>
+#include <stdint.h>
+#include <thread>
 
 #if __has_include(<libdeflate.h>)
 #include <libdeflate.h>
@@ -32,6 +34,7 @@ SOFTWARE.
 #include "libdeflate.h"
 #endif
 
+#define ZSTD_STATIC_LINKING_ONLY
 #if __has_include(<zstd.h>)
 #include <zstd.h>
 #elif __has_include("/opt/homebrew/include/zstd.h")
@@ -44,6 +47,7 @@ class Writer::Backend {
 public:
     virtual ~Backend() {}
     virtual bool writeBlock(FILE* fp, const char* data, size_t size) = 0;
+    virtual bool finalize(FILE* fp) { (void)fp; return true; }
     virtual bool isCompressed() const = 0;
 };
 
@@ -95,21 +99,32 @@ private:
 
 class ZstdBackend : public Writer::Backend {
 public:
-    ZstdBackend(int level, int workers) {
+    struct FrameMeta {
+        uint32_t cSize;
+        uint32_t dSize;
+    };
+
+    explicit ZstdBackend(int level) {
         mCCtx = ZSTD_createCCtx();
         if(mCCtx == NULL) {
             error_exit("Failed to create ZSTD_CCtx");
         }
 
-        if(workers < 1)
-            workers = 1;
-        if(workers > 64)
-            workers = 64;
+        unsigned hw = std::thread::hardware_concurrency();
+        if(hw == 0)
+            hw = 8;
+        // Keep a little headroom for non-zstd pipeline threads.
+        mMaxWorkers = (int)hw - 2;
+        if(mMaxWorkers < 1)
+            mMaxWorkers = 1;
+        if(mMaxWorkers > 64)
+            mMaxWorkers = 64;
+        mCurrentWorkers = 1;
 
         size_t r1 = ZSTD_CCtx_setParameter(mCCtx, ZSTD_c_compressionLevel, level);
         if(ZSTD_isError(r1))
             error_exit("Failed to set zstd compression level");
-        size_t r2 = ZSTD_CCtx_setParameter(mCCtx, ZSTD_c_nbWorkers, workers);
+        size_t r2 = ZSTD_CCtx_setParameter(mCCtx, ZSTD_c_nbWorkers, mCurrentWorkers);
         if(ZSTD_isError(r2))
             error_exit("Failed to set zstd nbWorkers");
     }
@@ -122,6 +137,9 @@ public:
     }
 
     bool writeBlock(FILE* fp, const char* data, size_t size) {
+        if(size > 0xFFFFFFFFULL)
+            return false;
+        tuneWorkers(size);
         size_t bound = ZSTD_compressBound(size);
         void* out = malloc(bound);
         if(out == NULL)
@@ -129,17 +147,97 @@ public:
         size_t outsize = ZSTD_compress2(mCCtx, out, bound, data, size);
         bool ok = false;
         if(!ZSTD_isError(outsize)) {
+            if(outsize > 0xFFFFFFFFULL) {
+                free(out);
+                return false;
+            }
             size_t ret = fwrite(out, 1, outsize, fp);
             ok = ret > 0;
+            if(ok) {
+                FrameMeta fm;
+                fm.cSize = (uint32_t)outsize;
+                fm.dSize = (uint32_t)size;
+                mFrames.push_back(fm);
+            }
         }
         free(out);
         return ok;
     }
 
+    bool finalize(FILE* fp) {
+        // Write zstd seek table in a skippable frame (format compatible with contrib/seekable_format).
+        // This keeps full-stream decompression compatibility with standard zstd decoders.
+        uint32_t const seekableMagic = 0x8F92EAB1U;
+        size_t const entriesBytes = mFrames.size() * 8;
+        size_t const seekTableLen = ZSTD_SKIPPABLEHEADERSIZE + entriesBytes + 9;
+        if(seekTableLen > 0xFFFFFFFFULL)
+            return false;
+
+        auto writeLE32 = [&](uint32_t v) -> bool {
+            unsigned char b[4];
+            b[0] = (unsigned char)(v & 0xFF);
+            b[1] = (unsigned char)((v >> 8) & 0xFF);
+            b[2] = (unsigned char)((v >> 16) & 0xFF);
+            b[3] = (unsigned char)((v >> 24) & 0xFF);
+            return fwrite(b, 1, 4, fp) == 4;
+        };
+
+        // Skippable frame header
+        if(!writeLE32((uint32_t)(ZSTD_MAGIC_SKIPPABLE_START | 0xE)))
+            return false;
+        if(!writeLE32((uint32_t)seekTableLen - ZSTD_SKIPPABLEHEADERSIZE))
+            return false;
+
+        // Entries: compressedSize + decompressedSize (checksum disabled)
+        for(size_t i=0; i<mFrames.size(); i++) {
+            if(!writeLE32(mFrames[i].cSize))
+                return false;
+            if(!writeLE32(mFrames[i].dSize))
+                return false;
+        }
+
+        // Footer: numFrames + descriptor + seekableMagic
+        if(!writeLE32((uint32_t)mFrames.size()))
+            return false;
+        unsigned char descriptor = 0; // checksumFlag = 0
+        if(fwrite(&descriptor, 1, 1, fp) != 1)
+            return false;
+        if(!writeLE32(seekableMagic))
+            return false;
+
+        return true;
+    }
+
     bool isCompressed() const { return true; }
 
 private:
+    void tuneWorkers(size_t inSize) {
+        int target = 1;
+        if(inSize >= (8ULL << 20))
+            target = 8;
+        else if(inSize >= (4ULL << 20))
+            target = 6;
+        else if(inSize >= (1ULL << 20))
+            target = 4;
+        else if(inSize >= (256ULL << 10))
+            target = 2;
+
+        if(target > mMaxWorkers)
+            target = mMaxWorkers;
+        if(target < 1)
+            target = 1;
+        if(target == mCurrentWorkers)
+            return;
+
+        size_t r = ZSTD_CCtx_setParameter(mCCtx, ZSTD_c_nbWorkers, target);
+        if(!ZSTD_isError(r))
+            mCurrentWorkers = target;
+    }
+
     ZSTD_CCtx* mCCtx;
+    int mCurrentWorkers;
+    int mMaxWorkers;
+    vector<FrameMeta> mFrames;
 };
 
 Writer::Writer(Options* opt, string filename, int compression, bool isSTDOUT, bool preCompressed){
@@ -197,8 +295,7 @@ void Writer::init(){
     if(ends_with(mFilename, ".gz") && !mPreCompressed) {
         mBackend = new GzipBackend(mCompression);
     } else if(ends_with(mFilename, ".zst") && !mPreCompressed) {
-        int workers = mOptions->thread > 1 ? mOptions->thread : 1;
-        mBackend = new ZstdBackend(mCompression, workers);
+        mBackend = new ZstdBackend(mCompression);
     } else {
         mBackend = new RawBackend();
     }
@@ -232,6 +329,10 @@ bool Writer::writeInternal(const char* strdata, size_t size) {
 }
 
 void Writer::close(){
+    if(mBackend && mFP) {
+        if(!mBackend->finalize(mFP))
+            error_exit("Failed to finalize compressed output: " + mFilename);
+    }
     if(mBackend) {
         delete mBackend;
         mBackend = NULL;

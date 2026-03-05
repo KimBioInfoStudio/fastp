@@ -30,6 +30,7 @@ SOFTWARE.
 #include "common.h"
 #include <iostream>
 #include <fstream>
+#include <vector>
 #include "options.h"
 #include <stdio.h>
 
