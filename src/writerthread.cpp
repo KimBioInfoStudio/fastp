@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstring>
 #include <thread>
+#include <algorithm>
 
 static const size_t ISAL_BATCH_SIZE = 512 << 10; // 512 KB accumulation threshold
 
@@ -14,6 +15,17 @@ static const size_t ISAL_BATCH_SIZE = 512 << 10; // 512 KB accumulation threshol
 static constexpr int64_t ADAPTIVE_MIN_TIMEOUT_US = 2000;   // 2ms floor
 static constexpr int64_t ADAPTIVE_MAX_TIMEOUT_US = 50000;  // 50ms ceiling
 static constexpr double  ADAPTIVE_EMA_ALPHA = 0.2;
+
+static inline string compressGzipOrDie(const string& raw, int level) {
+    if (raw.empty()) {
+        return string();
+    }
+    string compressed = isal_gzip_compress(raw.data(), raw.size(), level);
+    if (compressed.empty()) {
+        error_exit("ISA-L gzip compression failed");
+    }
+    return compressed;
+}
 
 WriterThread::WriterThread(Options* opt, string filename, bool isSTDOUT){
     mOptions = opt;
@@ -42,6 +54,10 @@ WriterThread::WriterThread(Options* opt, string filename, bool isSTDOUT){
     mOffsetRing = NULL;
     mNextSeq = NULL;
     mBufferLists = NULL;
+    mCompressInFlightBytes = 0;
+    mCompressInFlightByteLimit = 0;
+    mCompressInFlightChunkLimit = 0;
+    initCompressionFlightControl();
 
     if (mPwriteMode) {
         mFd = open(mFilename.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -96,10 +112,8 @@ bool WriterThread::setInputCompleted() {
     if(mPreCompressed) {
         for(int t=0; t<mOptions->thread; t++) {
             if(!mAccumBuf[t].empty()) {
-                string compressed = isal_gzip_compress(
-                    mAccumBuf[t].data(), mAccumBuf[t].size(), mIsalLevel);
-                mBufferLists[t]->produce(new string(std::move(compressed)));
-                mBufferLength++;
+                string compressed = compressGzipOrDie(mAccumBuf[t], mIsalLevel);
+                enqueueCompressedChunk(t, std::move(compressed));
                 mAccumBuf[t].clear();
             }
         }
@@ -108,6 +122,7 @@ bool WriterThread::setInputCompleted() {
     for(int t=0; t<mOptions->thread; t++) {
         mBufferLists[t]->setProducerFinished();
     }
+    mOutputCv.notify_all();
     return true;
 }
 
@@ -137,12 +152,17 @@ void WriterThread::output(){
     if (mPwriteMode) return;  // no-op
     SingleProducerSingleConsumerList<string*>* list =  mBufferLists[mWorkingBufferList];
     if(!list->canBeConsumed()) {
-        usleep(100);
+        std::unique_lock<std::mutex> lk(mOutputMutex);
+        mOutputCv.wait_for(lk, std::chrono::microseconds(200), [&]() {
+            return list->canBeConsumed() || (mInputCompleted && mBufferLength.load(std::memory_order_relaxed) == 0);
+        });
     } else {
         string* str = list->consume();
+        size_t bytes = str->length();
         mWriter1->write(str->data(), str->length());
         delete str;
         mBufferLength--;
+        releaseCompressedChunk(bytes);
         mWorkingBufferList = (mWorkingBufferList+1)%mOptions->thread;
     }
 }
@@ -162,10 +182,8 @@ void WriterThread::input(int tid, string* data) {
             auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 now - mLastFlushTs[tid]).count();
             if (elapsed_us >= mDynamicTimeoutUs[tid]) {
-                string compressed = isal_gzip_compress(
-                    mAccumBuf[tid].data(), mAccumBuf[tid].size(), mIsalLevel);
-                mBufferLists[tid]->produce(new string(std::move(compressed)));
-                mBufferLength++;
+                string compressed = compressGzipOrDie(mAccumBuf[tid], mIsalLevel);
+                enqueueCompressedChunk(tid, std::move(compressed));
                 mAccumBuf[tid].clear();
                 mLastFlushTs[tid] = now;
             }
@@ -175,10 +193,8 @@ void WriterThread::input(int tid, string* data) {
         mAccumBuf[tid].append(data->data(), data->length());
         delete data;
         if(mAccumBuf[tid].size() >= ISAL_BATCH_SIZE) {
-            string compressed = isal_gzip_compress(
-                mAccumBuf[tid].data(), mAccumBuf[tid].size(), mIsalLevel);
-            mBufferLists[tid]->produce(new string(std::move(compressed)));
-            mBufferLength++;
+            string compressed = compressGzipOrDie(mAccumBuf[tid], mIsalLevel);
+            enqueueCompressedChunk(tid, std::move(compressed));
             mAccumBuf[tid].clear();
             mLastFlushTs[tid] = now;
         }
@@ -186,6 +202,7 @@ void WriterThread::input(int tid, string* data) {
     }
     mBufferLists[tid]->produce(data);
     mBufferLength++;
+    mOutputCv.notify_one();
 }
 
 void WriterThread::inputPwrite(int tid, string* data) {
@@ -197,9 +214,7 @@ void WriterThread::inputPwrite(int tid, string* data) {
         // Cross-pack accumulation is incompatible with interleaved sequence
         // numbering: worker 0 handles packs 0,3,6,... so batching them would
         // place pack 0+3 data at pack 3's offset, before packs 1 and 2.
-        if (!data->empty()) {
-            writeData = isal_gzip_compress(data->data(), data->length(), mIsalLevel);
-        }
+        writeData = compressGzipOrDie(*data, mIsalLevel);
         delete data;
     } else {
         // .fq: write pack data directly
@@ -268,6 +283,64 @@ void WriterThread::updateAdaptiveTimeout(int tid, size_t bytes,
         if (clamped > ADAPTIVE_MAX_TIMEOUT_US) clamped = ADAPTIVE_MAX_TIMEOUT_US;
         mDynamicTimeoutUs[tid] = clamped;
     }
+}
+
+void WriterThread::initCompressionFlightControl() {
+    // Auto-mode only: bound queued pre-compressed chunks and bytes.
+    int chunkLimit = std::max(8, mOptions->thread * 2);
+    if (chunkLimit > 256)
+        chunkLimit = 256;
+
+    long byteLimit = (long)chunkLimit * 1024L * 1024L;
+    if (byteLimit < 16L * 1024L * 1024L)
+        byteLimit = 16L * 1024L * 1024L;
+    if (byteLimit > 512L * 1024L * 1024L)
+        byteLimit = 512L * 1024L * 1024L;
+
+    mCompressInFlightChunkLimit = chunkLimit;
+    mCompressInFlightByteLimit = byteLimit;
+    mCompressInFlightBytes.store(0, std::memory_order_relaxed);
+    mCompressFlight.configure(chunkLimit, 1);
+    mCompressFlight.setSync(&mCompressFlightMutex, &mCompressFlightCv, NULL);
+}
+
+void WriterThread::enqueueCompressedChunk(int tid, string&& compressed) {
+    if (!mPreCompressed) {
+        mBufferLists[tid]->produce(new string(std::move(compressed)));
+        mBufferLength++;
+        mOutputCv.notify_one();
+        return;
+    }
+
+    const long bytes = (long)compressed.size();
+    while (true) {
+        long cur = mCompressInFlightBytes.load(std::memory_order_relaxed);
+        if (cur + bytes <= mCompressInFlightByteLimit) {
+            if (mCompressInFlightBytes.compare_exchange_weak(cur, cur + bytes, std::memory_order_relaxed))
+                break;
+            continue;
+        }
+        std::unique_lock<std::mutex> lk(mCompressFlightMutex);
+        mCompressFlightCv.wait(lk, [&]() {
+            return mCompressInFlightBytes.load(std::memory_order_relaxed) + bytes <= mCompressInFlightByteLimit;
+        });
+    }
+
+    mCompressFlight.acquireForNextPack(mBufferLength.load(std::memory_order_relaxed));
+    mBufferLists[tid]->produce(new string(std::move(compressed)));
+    mBufferLength++;
+    mOutputCv.notify_one();
+}
+
+void WriterThread::releaseCompressedChunk(size_t bytes) {
+    if (!mPreCompressed)
+        return;
+
+    long remain = mCompressInFlightBytes.fetch_sub((long)bytes, std::memory_order_relaxed) - (long)bytes;
+    if (remain < 0)
+        mCompressInFlightBytes.store(0, std::memory_order_relaxed);
+    mCompressFlight.releaseAfterConsume(mBufferLength.load(std::memory_order_relaxed));
+    mCompressFlightCv.notify_all();
 }
 
 void WriterThread::cleanup() {

@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <atomic>
 #include "options.h"
 #include "threadconfig.h"
 #include "filter.h"
@@ -16,6 +17,7 @@
 #include "writerthread.h"
 #include "duplicate.h"
 #include "singleproducersingleconsumerlist.h"
+#include "flight_batch_manager.h"
 
 using namespace std;
 
@@ -34,6 +36,15 @@ private:
     void initOutput();
     void closeOutput();
     void writerTask(WriterThread* config);
+    void initAdaptiveBackpressure();
+    void onPackProduced(int rawBytes);
+    void onPackConsumed(int rawBytes);
+    bool shouldThrottleInput() const;
+    int inputPressureLevel() const;
+    long effectiveByteLimit() const;
+    void startRuntimeAutotune();
+    void stopRuntimeAutotune();
+    void runtimeAutotuneTask();
 
 private:
     Options* mOptions;
@@ -47,6 +58,19 @@ private:
     SingleProducerSingleConsumerList<RawPack*>** mInputLists;
     size_t mPackReadCounter;
     atomic_long mPackProcessedCounter;
+    atomic_long mInFlightPacks;
+    atomic_long mInFlightBytes;
+    atomic_long mAvgPackBytes;
+    FlightBatchManager mFlightBatch;
+    atomic_int mAdaptivePackLimit;
+    atomic_long mAdaptiveByteLimit;
+    atomic_int mRawChunksInFlightLimit;
+    atomic_long mBackpressureInputUsWindow;
+    atomic_long mWorkerWaitInputUsWindow;
+    atomic_bool mAutoTuneStop;
+    thread* mAutoTuneThread;
+    mutable mutex mBackpressureMutex;
+    condition_variable mBackpressureCv;
 };
 
 

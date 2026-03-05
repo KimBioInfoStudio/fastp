@@ -24,7 +24,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libdeflate-dev nasm
+          sudo apt-get install -y build-essential libdeflate-dev nasm zlib1g-dev libbz2-dev liblzma-dev curl
 
       - name: build ISA-L static (Ubuntu)
         if: runner.os == 'Linux'
@@ -38,7 +38,17 @@ jobs:
 
       - name: install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install libdeflate isa-l
+        run: brew install libdeflate isa-l xz
+
+      - name: build htslib static
+        run: |
+          curl -L -o /tmp/htslib.tar.bz2 https://github.com/samtools/htslib/releases/download/1.20/htslib-1.20.tar.bz2
+          tar -xjf /tmp/htslib.tar.bz2 -C /tmp
+          cd /tmp/htslib-1.20
+          ./configure --disable-shared --enable-static \
+            --disable-libcurl --disable-s3 --disable-gcs --disable-plugins
+          make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+          test -f /tmp/htslib-1.20/libhts.a
 
       - name: build Highway static
         run: |
@@ -59,9 +69,13 @@ jobs:
             [ -d "$prefix/lib64" ] && EXTRA_LIB="$EXTRA_LIB $prefix/lib64"
           done
           make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) \
-            INCLUDE_DIRS="$EXTRA_INC" LIBRARY_DIRS="$EXTRA_LIB"
+            INCLUDE_DIRS="$EXTRA_INC" LIBRARY_DIRS="$EXTRA_LIB" HTSLIB_DIR=/tmp/htslib-1.20
 
       - name: smoke test
         run: |
           ./fastp --version
           ./fastp -i testdata/R1.fq -o /dev/null
+
+      - name: unit tests
+        run: |
+          ./fastp test

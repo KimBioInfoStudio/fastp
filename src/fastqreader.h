@@ -38,7 +38,7 @@ SOFTWARE.
 #endif
 class FastqReader{
 public:
-	FastqReader(string filename, bool hasQuality = true, bool phred64=false);
+	FastqReader(string filename, bool hasQuality = true, bool phred64=false, int workerThreads=0);
 	~FastqReader();
 	bool isZipped();
 
@@ -86,13 +86,14 @@ private:
 	long mCounter;
 	bool mHasQuality;
 	bool mPhred64;
+	int mWorkerThreads;
 
 };
 
 class FastqReaderPair{
 public:
 	FastqReaderPair(FastqReader* left, FastqReader* right);
-	FastqReaderPair(string leftName, string rightName, bool hasQuality = true, bool phred64 = false, bool interleaved = false);
+	FastqReaderPair(string leftName, string rightName, bool hasQuality = true, bool phred64 = false, bool interleaved = false, int workerThreads = 0);
 	~FastqReaderPair();
 	void read(ReadPair* pair);
 	bool eof();

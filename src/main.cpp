@@ -8,6 +8,7 @@
 #include "options.h"
 #include "processor.h"
 #include "evaluator.h"
+#include "trace_profiler.h"
 
 // TODO: code refactoring to remove these global variables
 string command;
@@ -140,6 +141,8 @@ int main(int argc, char* argv[]){
     cmd.add<string>("json", 'j', "the json format report file name", false, "fastp.json");
     cmd.add<string>("html", 'h', "the html format report file name", false, "fastp.html");
     cmd.add<string>("report_title", 'R', "should be quoted with \' or \", default is \"fastp report\"", false, "fastp report");
+    cmd.add("trace", 0, "enable chrome://trace output. Can also be enabled by FASTP_TRACE=1");
+    cmd.add<string>("trace_file", 0, "trace output file path (default: fastp.trace.json, or FASTP_TRACE_FILE)", false, "");
 
     // threading
     cmd.add<int>("thread", 'w', "worker thread number, default is 3", false, 3);
@@ -156,6 +159,7 @@ int main(int argc, char* argv[]){
     cmd.add("discard_unmerged", 0, "DEPRECATED, no effect now, see the introduction for merging.");
     
     cmd.parse_check(argc, argv);
+    trace::init(cmd.exist("trace"), cmd.get<string>("trace_file"));
 
     if(argc == 1) {
         cerr << cmd.usage() <<endl;
@@ -515,6 +519,10 @@ int main(int argc, char* argv[]){
 
     cerr << endl << "JSON report: " << opt.jsonFile << endl;
     cerr << "HTML report: " << opt.htmlFile << endl;
+    if(trace::enabled()) {
+        trace::flush();
+        cerr << "Trace report: " << trace::outputPath() << endl;
+    }
     cerr << endl << command << endl;
     cerr << "fastp v" << FASTP_VER_FULL << ", time used: " << (t2)-t1 << " seconds" << endl;
 

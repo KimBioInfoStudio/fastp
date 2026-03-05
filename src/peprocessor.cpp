@@ -5,12 +5,16 @@
 #include <functional>
 #include <thread>
 #include <memory.h>
+#include <deque>
+#include <algorithm>
+#include <chrono>
 #include "util.h"
 #include "adaptertrimmer.h"
 #include "basecorrector.h"
 #include "jsonreporter.h"
 #include "htmlreporter.h"
 #include "polyx.h"
+#include "trace_profiler.h"
 
 PairEndProcessor::PairEndProcessor(Options* opt){
     mOptions = opt;
@@ -40,9 +44,28 @@ PairEndProcessor::PairEndProcessor(Options* opt){
     mLeftPackReadCounter = 0;
     mRightPackReadCounter = 0;
     mPackProcessedCounter = 0;
+    mLeftInFlightPacks = 0;
+    mRightInFlightPacks = 0;
+    mLeftInFlightBytes = 0;
+    mRightInFlightBytes = 0;
+    mAvgPackBytes = 256 * 1024;
+    int flightCap = std::max(4, mOptions->thread + 2);
+    mLeftFlightBatch.configure(flightCap, 32);
+    mRightFlightBatch.configure(flightCap, 32);
+    mLeftFlightBatch.setSync(&mBackpressureMutex, &mBackpressureCv, &shouldStopReading);
+    mRightFlightBatch.setSync(&mBackpressureMutex, &mBackpressureCv, &shouldStopReading);
+    mAdaptivePackLimit = PACK_IN_MEM_LIMIT;
+    mAdaptiveByteLimit = 64L * 1024L * 1024L;
+    mRawChunksInFlightLimit = 8;
+    mBackpressureInputUsWindow = 0;
+    mWorkerWaitInputUsWindow = 0;
+    mAutoTuneStop = true;
+    mAutoTuneThread = NULL;
+    initAdaptiveBackpressure();
 }
 
 PairEndProcessor::~PairEndProcessor() {
+    stopRuntimeAutotune();
     delete mInsertSizeHist;
     if(mDuplicate) {
         delete mDuplicate;
@@ -50,6 +73,258 @@ PairEndProcessor::~PairEndProcessor() {
     }
     delete[] mLeftInputLists;
     delete[] mRightInputLists;
+}
+
+void PairEndProcessor::initAdaptiveBackpressure() {
+    int packLimit = PACK_IN_MEM_LIMIT * 4 + mOptions->thread * 32;
+    if (packLimit < PACK_IN_MEM_LIMIT)
+        packLimit = PACK_IN_MEM_LIMIT;
+    if (packLimit > 2048)
+        packLimit = 2048;
+    if (mOptions->readsToProcess > 0) {
+        long maxByReads = mOptions->readsToProcess / PACK_SIZE;
+        if (maxByReads < 16)
+            maxByReads = 16;
+        if (packLimit > maxByReads)
+            packLimit = (int)maxByReads;
+    }
+    mAdaptivePackLimit.store(packLimit, std::memory_order_relaxed);
+
+    long bytesLimit = (long)packLimit * 512L * 1024L;
+    if (bytesLimit < 64L * 1024L * 1024L)
+        bytesLimit = 64L * 1024L * 1024L;
+    if (bytesLimit > 2L * 1024L * 1024L * 1024L)
+        bytesLimit = 2L * 1024L * 1024L * 1024L;
+    mAdaptiveByteLimit.store(bytesLimit, std::memory_order_relaxed);
+
+    // Keep a bounded read-ahead queue for raw gzip chunks.
+    int rawChunks = 8 + mOptions->thread / 2;
+    if (rawChunks < 4)
+        rawChunks = 4;
+    if (rawChunks > 64)
+        rawChunks = 64;
+    mRawChunksInFlightLimit.store(rawChunks, std::memory_order_relaxed);
+}
+
+long PairEndProcessor::effectiveByteLimit() const {
+    const long avg = mAvgPackBytes.load(std::memory_order_relaxed);
+    const long packLimit = mAdaptivePackLimit.load(std::memory_order_relaxed);
+    const long byteLimit = mAdaptiveByteLimit.load(std::memory_order_relaxed);
+    long dyn = packLimit * avg * 3;
+    if (dyn < byteLimit / 2)
+        dyn = byteLimit / 2;
+    if (dyn > 2L * 1024L * 1024L * 1024L)
+        dyn = 2L * 1024L * 1024L * 1024L;
+    return dyn;
+}
+
+bool PairEndProcessor::shouldThrottleInput(bool isLeft) const {
+    return inputPressureLevel(isLeft) > 0;
+}
+
+int PairEndProcessor::inputPressureLevel(bool isLeft) const {
+    const long packs = isLeft ? mLeftInFlightPacks.load(std::memory_order_relaxed)
+                              : mRightInFlightPacks.load(std::memory_order_relaxed);
+    const long bytes = isLeft ? mLeftInFlightBytes.load(std::memory_order_relaxed)
+                              : mRightInFlightBytes.load(std::memory_order_relaxed);
+    const long packLimit = mAdaptivePackLimit.load(std::memory_order_relaxed);
+    const long byteLimit = effectiveByteLimit();
+    if (packLimit <= 0 || byteLimit <= 0)
+        return 0;
+
+    const double packRatio = (double)packs / (double)packLimit;
+    const double byteRatio = (double)bytes / (double)byteLimit;
+    const double ratio = std::max(packRatio, byteRatio);
+
+    if (ratio >= 0.98)
+        return 2; // hard queue-full throttling
+    if (ratio >= 0.85)
+        return 1; // soft pacing
+    return 0;
+}
+
+void PairEndProcessor::startRuntimeAutotune() {
+    mAutoTuneStop.store(false, std::memory_order_relaxed);
+    if (mAutoTuneThread == NULL)
+        mAutoTuneThread = new std::thread(std::bind(&PairEndProcessor::runtimeAutotuneTask, this));
+}
+
+void PairEndProcessor::stopRuntimeAutotune() {
+    mAutoTuneStop.store(true, std::memory_order_relaxed);
+    mBackpressureCv.notify_all();
+    if (mAutoTuneThread) {
+        mAutoTuneThread->join();
+        delete mAutoTuneThread;
+        mAutoTuneThread = NULL;
+    }
+}
+
+void PairEndProcessor::runtimeAutotuneTask() {
+    using namespace std::chrono;
+
+    const int minPackLimit = PACK_IN_MEM_LIMIT;
+    const int maxPackLimit = 4096;
+    const long minByteLimit = 64L * 1024L * 1024L;
+    const long maxByteLimit = 2L * 1024L * 1024L * 1024L;
+    const int minRawChunks = 4;
+    const int maxRawChunks = 64;
+
+    const int intervalMs = 250;
+    const int cooldownTicks = 2;
+    const double targetBackpressureLow = 0.10;
+    const double targetBackpressureHigh = 0.30;
+    const double targetWaitInputHigh = 0.04;
+    int cooldown = 0;
+
+    while (!mAutoTuneStop.load(std::memory_order_relaxed)) {
+        std::this_thread::sleep_for(milliseconds(intervalMs));
+        if (mAutoTuneStop.load(std::memory_order_relaxed))
+            break;
+
+        const long bpUs = mBackpressureInputUsWindow.exchange(0, std::memory_order_relaxed);
+        const long wwUs = mWorkerWaitInputUsWindow.exchange(0, std::memory_order_relaxed);
+
+        const long leftPacks = mLeftInFlightPacks.load(std::memory_order_relaxed);
+        const long rightPacks = mRightInFlightPacks.load(std::memory_order_relaxed);
+        const long leftBytes = mLeftInFlightBytes.load(std::memory_order_relaxed);
+        const long rightBytes = mRightInFlightBytes.load(std::memory_order_relaxed);
+        const long inFlightPacks = std::max(leftPacks, rightPacks);
+        const long inFlightBytes = std::max(leftBytes, rightBytes);
+
+        const int packLimitCur = mAdaptivePackLimit.load(std::memory_order_relaxed);
+        const long byteLimitCur = mAdaptiveByteLimit.load(std::memory_order_relaxed);
+        const int rawChunksCur = mRawChunksInFlightLimit.load(std::memory_order_relaxed);
+
+        const long writerBacklog = std::max(
+            mLeftWriter ? mLeftWriter->bufferLength() : 0L,
+            mRightWriter ? mRightWriter->bufferLength() : 0L);
+
+        const double baseReaders = mOptions->interleavedInput ? 1.0 : 2.0;
+        const double bpRatio = bpUs / (intervalMs * 1000.0 * baseReaders);
+        const double wwRatio = wwUs / (intervalMs * 1000.0 * std::max(1, mOptions->thread));
+
+        bool changed = false;
+        if (cooldown > 0)
+            cooldown--;
+
+        const bool queueNearCap =
+            inFlightPacks > (packLimitCur * 90) / 100
+            || inFlightBytes > (byteLimitCur * 90) / 100;
+        const bool hardPressure =
+            writerBacklog > packLimitCur * 3
+            || inFlightPacks > (packLimitCur * 98) / 100
+            || inFlightBytes > (byteLimitCur * 98) / 100;
+        const bool moderatePressure =
+            writerBacklog > packLimitCur * 2
+            || queueNearCap;
+        const bool needMoreFeed =
+            wwRatio > targetWaitInputHigh
+            || (bpRatio > targetBackpressureHigh
+                && !moderatePressure);
+        const bool needLessPressure =
+            hardPressure
+            && wwRatio < 0.01
+            && bpRatio < targetBackpressureLow;
+
+        if (cooldown == 0 && needLessPressure) {
+            int nextPack = (packLimitCur * 90) / 100;
+            long nextBytes = (byteLimitCur * 90) / 100;
+            int rawStep = std::max(1, rawChunksCur / 6);
+            int nextRawChunks = rawChunksCur - rawStep;
+
+            if (nextPack < minPackLimit) nextPack = minPackLimit;
+            if (nextBytes < minByteLimit) nextBytes = minByteLimit;
+            if (nextRawChunks < minRawChunks) nextRawChunks = minRawChunks;
+
+            if (nextPack != packLimitCur || nextBytes != byteLimitCur || nextRawChunks != rawChunksCur) {
+                mAdaptivePackLimit.store(nextPack, std::memory_order_relaxed);
+                mAdaptiveByteLimit.store(nextBytes, std::memory_order_relaxed);
+                mRawChunksInFlightLimit.store(nextRawChunks, std::memory_order_relaxed);
+                changed = true;
+            }
+        } else if (cooldown == 0 && needMoreFeed) {
+            int nextPack = (packLimitCur * 120) / 100;
+            long nextBytes = (byteLimitCur * 120) / 100;
+            int rawStep = std::max(1, rawChunksCur / 5);
+            int nextRawChunks = rawChunksCur + rawStep;
+
+            if (queueNearCap && bpRatio > targetBackpressureHigh && wwRatio < targetWaitInputHigh) {
+                nextPack = (packLimitCur * 125) / 100;
+                nextBytes = (byteLimitCur * 125) / 100;
+            }
+
+            if (nextPack > maxPackLimit) nextPack = maxPackLimit;
+            if (nextBytes > maxByteLimit) nextBytes = maxByteLimit;
+            if (nextRawChunks > maxRawChunks) nextRawChunks = maxRawChunks;
+
+            if (nextPack != packLimitCur || nextBytes != byteLimitCur || nextRawChunks != rawChunksCur) {
+                mAdaptivePackLimit.store(nextPack, std::memory_order_relaxed);
+                mAdaptiveByteLimit.store(nextBytes, std::memory_order_relaxed);
+                mRawChunksInFlightLimit.store(nextRawChunks, std::memory_order_relaxed);
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            cooldown = cooldownTicks;
+            mBackpressureCv.notify_all();
+        }
+    }
+}
+
+void PairEndProcessor::onPackProduced(bool isLeft, int rawBytes) {
+    atomic_long& packs = isLeft ? mLeftInFlightPacks : mRightInFlightPacks;
+    long packsBefore = packs.load(std::memory_order_relaxed);
+    if (mOptions->interleavedInput) {
+        if (isLeft)
+            mLeftFlightBatch.acquireForNextPack(packsBefore);
+        else
+            mRightFlightBatch.acquireForNextPack(packsBefore);
+    }
+
+    if (rawBytes < 0)
+        rawBytes = 0;
+    if (isLeft) {
+        packs.fetch_add(1, std::memory_order_relaxed);
+        mLeftInFlightBytes.fetch_add(rawBytes, std::memory_order_relaxed);
+    } else {
+        packs.fetch_add(1, std::memory_order_relaxed);
+        mRightInFlightBytes.fetch_add(rawBytes, std::memory_order_relaxed);
+    }
+
+    const long prev = mAvgPackBytes.load(std::memory_order_relaxed);
+    const long next = (prev * 7 + rawBytes) / 8;
+    if (next > 0)
+        mAvgPackBytes.store(next, std::memory_order_relaxed);
+
+    mBackpressureCv.notify_all();
+}
+
+void PairEndProcessor::onPackConsumed(int leftRawBytes, int rightRawBytes) {
+    if (leftRawBytes < 0)
+        leftRawBytes = 0;
+    if (rightRawBytes < 0)
+        rightRawBytes = 0;
+
+    long lp = mLeftInFlightPacks.fetch_sub(1, std::memory_order_relaxed) - 1;
+    long rp = mRightInFlightPacks.fetch_sub(1, std::memory_order_relaxed) - 1;
+    if (lp < 0)
+        mLeftInFlightPacks.store(0, std::memory_order_relaxed);
+    if (rp < 0)
+        mRightInFlightPacks.store(0, std::memory_order_relaxed);
+
+    long lb = mLeftInFlightBytes.fetch_sub(leftRawBytes, std::memory_order_relaxed) - leftRawBytes;
+    long rb = mRightInFlightBytes.fetch_sub(rightRawBytes, std::memory_order_relaxed) - rightRawBytes;
+    if (lb < 0)
+        mLeftInFlightBytes.store(0, std::memory_order_relaxed);
+    if (rb < 0)
+        mRightInFlightBytes.store(0, std::memory_order_relaxed);
+
+    if (mOptions->interleavedInput) {
+        mLeftFlightBatch.releaseAfterConsume(lp);
+        mRightFlightBatch.releaseAfterConsume(rp);
+    }
+    mBackpressureCv.notify_all();
 }
 
 void PairEndProcessor::initOutput() {
@@ -121,6 +396,7 @@ void PairEndProcessor::initConfig(ThreadConfig* config) {
 bool PairEndProcessor::process(){
     if(!mOptions->split.enabled)
         initOutput();
+    startRuntimeAutotune();
 
     std::thread* readerLeft = NULL;
     std::thread* readerRight = NULL;
@@ -198,6 +474,7 @@ bool PairEndProcessor::process(){
         if(overlappedWriterThread)
             overlappedWriterThread->join();
     }
+    stopRuntimeAutotune();
 
     if(mOptions->verbose)
         loginfo("start to generate reports\n");
@@ -336,7 +613,16 @@ int PairEndProcessor::getPeakInsertSize() {
 }
 
 ReadPack* PairEndProcessor::parseRawPack(RawPack* rawPack) {
+    if (rawPack->directReadPack) {
+        ReadPack* pack = rawPack->directPack;
+        if (pack)
+            pack->rawBytes = 0;
+        delete rawPack;
+        return pack;
+    }
+
     int count = rawPack->readCount;
+    int rawBytes = rawPack->length;
     Read** data = new Read*[count];
     char* buf = rawPack->buffer->data + rawPack->offset;
     int len = rawPack->length;
@@ -367,6 +653,16 @@ ReadPack* PairEndProcessor::parseRawPack(RawPack* rawPack) {
         }
 
         data[i] = new Read(name, seq, strand, qual, phred64);
+
+        if (name->empty() || (*name)[0] != '@') {
+            error_exit("invalid FASTQ record: name line does not start with '@'");
+        }
+        if (strand->empty() || (*strand)[0] != '+') {
+            error_exit("invalid FASTQ record: strand line does not start with '+'");
+        }
+        if (seq->length() != qual->length()) {
+            error_exit("invalid FASTQ record: sequence and quality lengths differ");
+        }
     }
 
     rawPack->buffer->release();
@@ -375,6 +671,7 @@ ReadPack* PairEndProcessor::parseRawPack(RawPack* rawPack) {
     ReadPack* pack = new ReadPack;
     pack->data = data;
     pack->count = count;
+    pack->rawBytes = rawBytes;
     return pack;
 }
 
@@ -386,6 +683,7 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
         cerr << "Read2 pack size: " << rightPack->count << endl;
         cerr << "Ignore the unmatched reads" << endl << endl;
         shouldStopReading = true;
+        mBackpressureCv.notify_all();
     }
     int tid = config->getThreadId();
 
@@ -685,12 +983,15 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
         config->addMergedPairs(mergedCount);
     }
 
+    const int leftRawBytes = leftPack->rawBytes;
+    const int rightRawBytes = rightPack->rawBytes;
     delete[] leftPack->data;
     delete[] rightPack->data;
     delete leftPack;
     delete rightPack;
 
     mPackProcessedCounter++;
+    onPackConsumed(leftRawBytes, rightRawBytes);
 
     return true;
 }
@@ -712,6 +1013,7 @@ void PairEndProcessor::statInsertSize(Read* r1, Read* r2, OverlapResult& ov, int
 
 void PairEndProcessor::readerTask(bool isLeft)
 {
+    trace::TaskBreakdown task(isLeft ? "pe.reader.r1" : "pe.reader.r2", "pe.reader");
     if(mOptions->verbose) {
         if(isLeft)
             loginfo("start to load data of read1");
@@ -721,11 +1023,39 @@ void PairEndProcessor::readerTask(bool isLeft)
     long lastReported = 0;
     int slept = 0;
     long readNum = 0;
-    FastqReader* reader = NULL;
-    if(isLeft)
-        reader = new FastqReader(mOptions->in1, true, mOptions->phred64);
-    else
-        reader = new FastqReader(mOptions->in2, true, mOptions->phred64);
+    std::deque<std::pair<char*, int> > rawQueue;
+    std::mutex rawMu;
+    std::condition_variable rawCvNotEmpty;
+    std::condition_variable rawCvNotFull;
+    bool rawDone = false;
+    std::atomic_bool stopRawProducer(false);
+
+    std::thread rawProducer([&]() {
+        FastqReader reader(isLeft ? mOptions->in1 : mOptions->in2, true, mOptions->phred64, mOptions->thread);
+        while (!shouldStopReading && !stopRawProducer) {
+            int rawLen = 0;
+            char* rawData = reader.readRawBuffer(rawLen);
+            if (!rawData)
+                break;
+            std::unique_lock<std::mutex> lk(rawMu);
+            rawCvNotFull.wait(lk, [&]() {
+                const int rawLimit = mRawChunksInFlightLimit.load(std::memory_order_relaxed);
+                return rawQueue.size() < (size_t)rawLimit || shouldStopReading || stopRawProducer;
+            });
+            if (shouldStopReading || stopRawProducer) {
+                lk.unlock();
+                delete[] rawData;
+                break;
+            }
+            rawQueue.push_back(std::make_pair(rawData, rawLen));
+            lk.unlock();
+            rawCvNotEmpty.notify_one();
+        }
+        std::unique_lock<std::mutex> lk(rawMu);
+        rawDone = true;
+        lk.unlock();
+        rawCvNotEmpty.notify_all();
+    });
 
     char* leftover = NULL;
     int leftoverLen = 0;
@@ -736,9 +1066,24 @@ void PairEndProcessor::readerTask(bool isLeft)
             break;
 
         int rawLen = 0;
-        char* rawData = reader->readRawBuffer(rawLen);
-        if (!rawData)
-            break;
+        char* rawData = NULL;
+        {
+            const uint64_t t0 = trace::nowUs();
+            std::unique_lock<std::mutex> lk(rawMu);
+            rawCvNotEmpty.wait(lk, [&]() { return !rawQueue.empty() || rawDone || shouldStopReading; });
+            const uint64_t t1 = trace::nowUs();
+            task.addGap("wait_raw_chunk", t1 > t0 ? t1 - t0 : 0);
+
+            if ((rawQueue.empty() && rawDone) || shouldStopReading)
+                break;
+
+            std::pair<char*, int> item = rawQueue.front();
+            rawQueue.pop_front();
+            rawData = item.first;
+            rawLen = item.second;
+            lk.unlock();
+            rawCvNotFull.notify_one();
+        }
 
         // build working buffer: leftover + new raw data
         char* workBuf;
@@ -790,9 +1135,11 @@ void PairEndProcessor::readerTask(bool isLeft)
                         if (isLeft) {
                             mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(pack);
                             mLeftPackReadCounter++;
+                            onPackProduced(true, pack->length);
                         } else {
                             mRightInputLists[mRightPackReadCounter % mOptions->thread]->produce(pack);
                             mRightPackReadCounter++;
+                            onPackProduced(false, pack->length);
                         }
                     }
                     recordsInPack = 0;
@@ -810,30 +1157,43 @@ void PairEndProcessor::readerTask(bool isLeft)
                     if (isLeft) {
                         mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(pack);
                         mLeftPackReadCounter++;
+                        onPackProduced(true, pack->length);
                     } else {
                         mRightInputLists[mRightPackReadCounter % mOptions->thread]->produce(pack);
                         mRightPackReadCounter++;
+                        onPackProduced(false, pack->length);
                     }
 
                     readNum += recordsInPack;
                     recordsInPack = 0;
                     packStart = lastRecordEnd;
 
-                    if (isLeft) {
-                        while (mLeftPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT) {
-                            slept++;
-                            usleep(100);
-                        }
-                    } else {
-                        while (mRightPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT) {
-                            slept++;
-                            usleep(100);
-                        }
+                    while (true) {
+                        const int pressure = inputPressureLevel(isLeft);
+                        if (pressure <= 0 || shouldStopReading)
+                            break;
+                        if (pressure < 2)
+                            break;
+
+                        const uint64_t t0 = trace::nowUs();
+                        slept++;
+                        std::unique_lock<std::mutex> lk(mBackpressureMutex);
+                        mBackpressureCv.wait(lk, [&]() {
+                            return inputPressureLevel(isLeft) < 2 || shouldStopReading;
+                        });
+                        const uint64_t t1 = trace::nowUs();
+                        if (t1 > t0)
+                            mBackpressureInputUsWindow.fetch_add((long)(t1 - t0), std::memory_order_relaxed);
+                        task.addGap("queue_full_wait", t1 > t0 ? t1 - t0 : 0);
                     }
-                    if (readNum % (PACK_SIZE * PACK_IN_MEM_LIMIT) == 0 && mLeftWriter) {
-                        while ((mLeftWriter && mLeftWriter->bufferLength() > PACK_IN_MEM_LIMIT) || (mRightWriter && mRightWriter->bufferLength() > PACK_IN_MEM_LIMIT)) {
+                    const int packLimit = mAdaptivePackLimit.load(std::memory_order_relaxed);
+                    if (packLimit > 0 && readNum % (PACK_SIZE * packLimit) == 0 && mLeftWriter) {
+                        while ((mLeftWriter && mLeftWriter->bufferLength() > packLimit) || (mRightWriter && mRightWriter->bufferLength() > packLimit)) {
+                            const uint64_t t0 = trace::nowUs();
                             slept++;
                             usleep(1000);
+                            const uint64_t t1 = trace::nowUs();
+                            task.addGap("backpressure_writer", t1 > t0 ? t1 - t0 : 0);
                         }
                     }
                 }
@@ -866,6 +1226,8 @@ void PairEndProcessor::readerTask(bool isLeft)
             break;
     }
 
+    stopRawProducer = true;
+
     // final leftover
     if (leftoverLen > 0) {
         int nlCount = 0;
@@ -892,9 +1254,11 @@ void PairEndProcessor::readerTask(bool isLeft)
             if (isLeft) {
                 mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(pack);
                 mLeftPackReadCounter++;
+                onPackProduced(true, pack->length);
             } else {
                 mRightInputLists[mRightPackReadCounter % mOptions->thread]->produce(pack);
                 mRightPackReadCounter++;
+                onPackProduced(false, pack->length);
             }
             buf->release();
         } else {
@@ -910,6 +1274,7 @@ void PairEndProcessor::readerTask(bool isLeft)
         else
             mRightInputLists[t]->setProducerFinished();
     }
+    mBackpressureCv.notify_all();
 
     if(mOptions->verbose) {
         if(isLeft) {
@@ -922,12 +1287,14 @@ void PairEndProcessor::readerTask(bool isLeft)
         }
     }
 
-    if(reader != NULL)
-        delete reader;
+    rawCvNotFull.notify_all();
+    rawCvNotEmpty.notify_all();
+    rawProducer.join();
 }
 
 void PairEndProcessor::interleavedReaderTask()
 {
+    trace::TaskBreakdown task("pe.reader.interleaved", "pe.reader");
     if(mOptions->verbose)
         loginfo("start to load data");
     long lastReported = 0;
@@ -937,66 +1304,34 @@ void PairEndProcessor::interleavedReaderTask()
     Read** dataRight = new Read*[PACK_SIZE];
     memset(dataLeft, 0, sizeof(Read*)*PACK_SIZE);
     memset(dataRight, 0, sizeof(Read*)*PACK_SIZE);
-    FastqReaderPair reader(mOptions->in1, mOptions->in2, true, mOptions->phred64,true);
+    FastqReaderPair reader(mOptions->in1, mOptions->in2, true, mOptions->phred64, true, mOptions->thread);
     int count=0;
     bool needToBreak = false;
     ReadPair* pair = new ReadPair();
+    auto wrapDirectPack = [](Read** reads, int count) -> RawPack* {
+        ReadPack* parsed = new ReadPack;
+        parsed->data = reads;
+        parsed->count = count;
+        parsed->rawBytes = 0;
+
+        RawPack* pack = new RawPack;
+        pack->directReadPack = true;
+        pack->directPack = parsed;
+        return pack;
+    };
     while(true){
         reader.read(pair);
         if(pair->eof() || needToBreak){
-            // Wrap parsed reads into RawPack via serialization
-            // For interleaved mode, we serialize Read objects back to raw text
-            auto serializeReads = [](Read** reads, int count) -> RawPack* {
-                if (count == 0) {
-                    // empty pack
-                    char* emptyBuf = new char[1];
-                    emptyBuf[0] = '\0';
-                    RawBuffer* buf = new RawBuffer(emptyBuf, 0);
-                    RawPack* pack = new RawPack;
-                    pack->buffer = buf;
-                    pack->offset = 0;
-                    pack->length = 0;
-                    pack->readCount = 0;
-                    buf->addRef();
-                    buf->release();
-                    return pack;
-                }
-                string raw;
-                raw.reserve(count * 320);
-                for (int i = 0; i < count; i++) {
-                    raw += *reads[i]->mName;
-                    raw += '\n';
-                    raw += *reads[i]->mSeq;
-                    raw += '\n';
-                    raw += *reads[i]->mStrand;
-                    raw += '\n';
-                    raw += *reads[i]->mQuality;
-                    raw += '\n';
-                    delete reads[i];
-                }
-                delete[] reads;
-                int len = raw.size();
-                char* data = new char[len];
-                memcpy(data, raw.c_str(), len);
-                RawBuffer* buf = new RawBuffer(data, len);
-                RawPack* pack = new RawPack;
-                pack->buffer = buf;
-                pack->offset = 0;
-                pack->length = len;
-                pack->readCount = count;
-                buf->addRef();
-                buf->release();
-                return pack;
-            };
-
-            RawPack* packLeft = serializeReads(dataLeft, count);
-            RawPack* packRight = serializeReads(dataRight, count);
+            RawPack* packLeft = wrapDirectPack(dataLeft, count);
+            RawPack* packRight = wrapDirectPack(dataRight, count);
 
             mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(packLeft);
             mLeftPackReadCounter++;
+            onPackProduced(true, 0);
 
             mRightInputLists[mRightPackReadCounter % mOptions->thread]->produce(packRight);
             mRightPackReadCounter++;
+            onPackProduced(false, 0);
 
             dataLeft = NULL;
             dataRight = NULL;
@@ -1014,57 +1349,48 @@ void PairEndProcessor::interleavedReaderTask()
             loginfo(msg);
         }
         if(count == PACK_SIZE || needToBreak){
-            auto serializeReads = [](Read** reads, int count) -> RawPack* {
-                string raw;
-                raw.reserve(count * 320);
-                for (int i = 0; i < count; i++) {
-                    raw += *reads[i]->mName;
-                    raw += '\n';
-                    raw += *reads[i]->mSeq;
-                    raw += '\n';
-                    raw += *reads[i]->mStrand;
-                    raw += '\n';
-                    raw += *reads[i]->mQuality;
-                    raw += '\n';
-                    delete reads[i];
-                }
-                delete[] reads;
-                int len = raw.size();
-                char* data = new char[len];
-                memcpy(data, raw.c_str(), len);
-                RawBuffer* buf = new RawBuffer(data, len);
-                RawPack* pack = new RawPack;
-                pack->buffer = buf;
-                pack->offset = 0;
-                pack->length = len;
-                pack->readCount = count;
-                buf->addRef();
-                buf->release();
-                return pack;
-            };
-
-            RawPack* packLeft = serializeReads(dataLeft, count);
-            RawPack* packRight = serializeReads(dataRight, count);
+            RawPack* packLeft = wrapDirectPack(dataLeft, count);
+            RawPack* packRight = wrapDirectPack(dataRight, count);
 
             mLeftInputLists[mLeftPackReadCounter % mOptions->thread]->produce(packLeft);
             mLeftPackReadCounter++;
+            onPackProduced(true, 0);
 
             mRightInputLists[mRightPackReadCounter % mOptions->thread]->produce(packRight);
             mRightPackReadCounter++;
+            onPackProduced(false, 0);
 
             dataLeft = new Read*[PACK_SIZE];
             dataRight = new Read*[PACK_SIZE];
             memset(dataLeft, 0, sizeof(Read*)*PACK_SIZE);
             memset(dataRight, 0, sizeof(Read*)*PACK_SIZE);
-            while(mLeftPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT){
+            while(true){
+                const int pressure = std::max(inputPressureLevel(true), inputPressureLevel(false));
+                if (pressure <= 0 || shouldStopReading)
+                    break;
+                if (pressure < 2)
+                    break;
+
+                const uint64_t t0 = trace::nowUs();
                 slept++;
-                usleep(100);
+                std::unique_lock<std::mutex> lk(mBackpressureMutex);
+                mBackpressureCv.wait(lk, [&]() {
+                    return std::max(inputPressureLevel(true), inputPressureLevel(false)) < 2 || shouldStopReading;
+                });
+                const uint64_t t1 = trace::nowUs();
+                if (t1 > t0)
+                    mBackpressureInputUsWindow.fetch_add((long)(t1 - t0), std::memory_order_relaxed);
+                task.addGap("queue_full_wait", t1 > t0 ? t1 - t0 : 0);
             }
             readNum += count;
-            if(readNum % (PACK_SIZE * PACK_IN_MEM_LIMIT) == 0 && mLeftWriter) {
-                while( (mLeftWriter && mLeftWriter->bufferLength() > PACK_IN_MEM_LIMIT) || (mRightWriter && mRightWriter->bufferLength() > PACK_IN_MEM_LIMIT) ){
+            const int packLimit = mAdaptivePackLimit.load(std::memory_order_relaxed);
+            if(packLimit > 0 && readNum % (PACK_SIZE * packLimit) == 0 && mLeftWriter) {
+                while( (mLeftWriter && mLeftWriter->bufferLength() > packLimit) || (mRightWriter && mRightWriter->bufferLength() > packLimit) ){
+                    const uint64_t t0 = trace::nowUs();
                     slept++;
                     usleep(1000);
+                    const uint64_t t1 = trace::nowUs();
+                    task.addGap("backpressure_writer", t1 > t0 ? t1 - t0 : 0);
                 }
             }
             count = 0;
@@ -1077,6 +1403,7 @@ void PairEndProcessor::interleavedReaderTask()
         mLeftInputLists[t]->setProducerFinished();
         mRightInputLists[t]->setProducerFinished();
     }
+    mBackpressureCv.notify_all();
 
     if(mOptions->verbose) {
         loginfo("interleaved: loading completed with " + to_string(mLeftPackReadCounter) + " packs");
@@ -1093,6 +1420,7 @@ void PairEndProcessor::interleavedReaderTask()
 
 void PairEndProcessor::processorTask(ThreadConfig* config)
 {
+    trace::TaskBreakdown task("pe.worker." + to_string(config->getThreadId() + 1), "pe.worker");
     SingleProducerSingleConsumerList<RawPack*>* inputLeft = config->getLeftInput();
     SingleProducerSingleConsumerList<RawPack*>* inputRight = config->getRightInput();
     while(true) {
@@ -1111,7 +1439,18 @@ void PairEndProcessor::processorTask(ThreadConfig* config)
         } else if(inputRight->isProducerFinished() && !inputRight->canBeConsumed()) {
             break;
         } else {
-            usleep(100);
+            const uint64_t t0 = trace::nowUs();
+            std::unique_lock<std::mutex> lk(mBackpressureMutex);
+            mBackpressureCv.wait(lk, [&]() {
+                return config->canBeStopped()
+                    || (inputLeft->canBeConsumed() && inputRight->canBeConsumed())
+                    || (inputLeft->isProducerFinished() && !inputLeft->canBeConsumed())
+                    || (inputRight->isProducerFinished() && !inputRight->canBeConsumed());
+            });
+            const uint64_t t1 = trace::nowUs();
+            if (t1 > t0)
+                mWorkerWaitInputUsWindow.fetch_add((long)(t1 - t0), std::memory_order_relaxed);
+            task.addGap("wait_input", t1 > t0 ? t1 - t0 : 0);
         }
     }
     inputLeft->setConsumerFinished();
@@ -1148,6 +1487,7 @@ void PairEndProcessor::processorTask(ThreadConfig* config)
 
 void PairEndProcessor::writerTask(WriterThread* config)
 {
+    trace::TaskBreakdown task("pe.writer." + config->getFilename(), "pe.writer");
     while(true) {
         if(config->isCompleted()){
             // last check for possible threading related issue

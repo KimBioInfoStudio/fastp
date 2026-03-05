@@ -5,11 +5,15 @@
 #include <functional>
 #include <thread>
 #include <memory.h>
+#include <deque>
+#include <algorithm>
+#include <chrono>
 #include "util.h"
 #include "jsonreporter.h"
 #include "htmlreporter.h"
 #include "adaptertrimmer.h"
 #include "polyx.h"
+#include "trace_profiler.h"
 
 SingleEndProcessor::SingleEndProcessor(Options* opt){
     mOptions = opt;
@@ -27,15 +31,249 @@ SingleEndProcessor::SingleEndProcessor(Options* opt){
 
     mPackReadCounter = 0;
     mPackProcessedCounter = 0;
+    mInFlightPacks = 0;
+    mInFlightBytes = 0;
+    mAvgPackBytes = 256 * 1024;
+    int flightCap = std::max(4, mOptions->thread + 2);
+    mFlightBatch.configure(flightCap, 32);
+    mFlightBatch.setSync(&mBackpressureMutex, &mBackpressureCv, NULL);
+    mAdaptivePackLimit = PACK_IN_MEM_LIMIT;
+    mAdaptiveByteLimit = 64L * 1024L * 1024L;
+    mRawChunksInFlightLimit = 8;
+    mBackpressureInputUsWindow = 0;
+    mWorkerWaitInputUsWindow = 0;
+    mAutoTuneStop = true;
+    mAutoTuneThread = NULL;
+    initAdaptiveBackpressure();
 }
 
 SingleEndProcessor::~SingleEndProcessor() {
+    stopRuntimeAutotune();
     delete mFilter;
     if(mDuplicate) {
         delete mDuplicate;
         mDuplicate = NULL;
     }
     delete[] mInputLists;
+}
+
+void SingleEndProcessor::initAdaptiveBackpressure() {
+    int packLimit = PACK_IN_MEM_LIMIT * 4 + mOptions->thread * 32;
+    if (packLimit < PACK_IN_MEM_LIMIT)
+        packLimit = PACK_IN_MEM_LIMIT;
+    if (packLimit > 2048)
+        packLimit = 2048;
+    if (mOptions->readsToProcess > 0) {
+        long maxByReads = mOptions->readsToProcess / PACK_SIZE;
+        if (maxByReads < 16)
+            maxByReads = 16;
+        if (packLimit > maxByReads)
+            packLimit = (int)maxByReads;
+    }
+    mAdaptivePackLimit.store(packLimit, std::memory_order_relaxed);
+
+    long bytesLimit = (long)packLimit * 512L * 1024L;
+    if (bytesLimit < 64L * 1024L * 1024L)
+        bytesLimit = 64L * 1024L * 1024L;
+    if (bytesLimit > 2L * 1024L * 1024L * 1024L)
+        bytesLimit = 2L * 1024L * 1024L * 1024L;
+    mAdaptiveByteLimit.store(bytesLimit, std::memory_order_relaxed);
+
+    int rawChunks = 8 + mOptions->thread / 2;
+    if (rawChunks < 4)
+        rawChunks = 4;
+    if (rawChunks > 64)
+        rawChunks = 64;
+    mRawChunksInFlightLimit.store(rawChunks, std::memory_order_relaxed);
+}
+
+long SingleEndProcessor::effectiveByteLimit() const {
+    const long avg = mAvgPackBytes.load(std::memory_order_relaxed);
+    const long packLimit = mAdaptivePackLimit.load(std::memory_order_relaxed);
+    const long byteLimit = mAdaptiveByteLimit.load(std::memory_order_relaxed);
+    long dyn = packLimit * avg * 3;
+    if (dyn < byteLimit / 2)
+        dyn = byteLimit / 2;
+    if (dyn > 2L * 1024L * 1024L * 1024L)
+        dyn = 2L * 1024L * 1024L * 1024L;
+    return dyn;
+}
+
+bool SingleEndProcessor::shouldThrottleInput() const {
+    return inputPressureLevel() > 0;
+}
+
+int SingleEndProcessor::inputPressureLevel() const {
+    const long packs = mInFlightPacks.load(std::memory_order_relaxed);
+    const long bytes = mInFlightBytes.load(std::memory_order_relaxed);
+    const long packLimit = mAdaptivePackLimit.load(std::memory_order_relaxed);
+    const long byteLimit = effectiveByteLimit();
+    if (packLimit <= 0 || byteLimit <= 0)
+        return 0;
+
+    const double packRatio = (double)packs / (double)packLimit;
+    const double byteRatio = (double)bytes / (double)byteLimit;
+    const double ratio = std::max(packRatio, byteRatio);
+
+    if (ratio >= 0.98)
+        return 2; // hard queue-full throttling
+    if (ratio >= 0.85)
+        return 1; // soft pacing
+    return 0;
+}
+
+void SingleEndProcessor::startRuntimeAutotune() {
+    mAutoTuneStop.store(false, std::memory_order_relaxed);
+    if (mAutoTuneThread == NULL)
+        mAutoTuneThread = new std::thread(std::bind(&SingleEndProcessor::runtimeAutotuneTask, this));
+}
+
+void SingleEndProcessor::stopRuntimeAutotune() {
+    mAutoTuneStop.store(true, std::memory_order_relaxed);
+    mBackpressureCv.notify_all();
+    if (mAutoTuneThread) {
+        mAutoTuneThread->join();
+        delete mAutoTuneThread;
+        mAutoTuneThread = NULL;
+    }
+}
+
+void SingleEndProcessor::runtimeAutotuneTask() {
+    using namespace std::chrono;
+
+    const int minPackLimit = PACK_IN_MEM_LIMIT;
+    const int maxPackLimit = 4096;
+    const long minByteLimit = 64L * 1024L * 1024L;
+    const long maxByteLimit = 2L * 1024L * 1024L * 1024L;
+    const int minRawChunks = 4;
+    const int maxRawChunks = 64;
+
+    const int intervalMs = 250;
+    const int cooldownTicks = 2;
+    const double targetBackpressureLow = 0.10;
+    const double targetBackpressureHigh = 0.30;
+    const double targetWaitInputHigh = 0.04;
+    int cooldown = 0;
+
+    while (!mAutoTuneStop.load(std::memory_order_relaxed)) {
+        std::this_thread::sleep_for(milliseconds(intervalMs));
+        if (mAutoTuneStop.load(std::memory_order_relaxed))
+            break;
+
+        const long bpUs = mBackpressureInputUsWindow.exchange(0, std::memory_order_relaxed);
+        const long wwUs = mWorkerWaitInputUsWindow.exchange(0, std::memory_order_relaxed);
+
+        const long inFlightPacks = mInFlightPacks.load(std::memory_order_relaxed);
+        const long inFlightBytes = mInFlightBytes.load(std::memory_order_relaxed);
+
+        const int packLimitCur = mAdaptivePackLimit.load(std::memory_order_relaxed);
+        const long byteLimitCur = mAdaptiveByteLimit.load(std::memory_order_relaxed);
+        const int rawChunksCur = mRawChunksInFlightLimit.load(std::memory_order_relaxed);
+
+        const long writerBacklog = mLeftWriter ? mLeftWriter->bufferLength() : 0L;
+
+        const double bpRatio = bpUs / (intervalMs * 1000.0);
+        const double wwRatio = wwUs / (intervalMs * 1000.0 * std::max(1, mOptions->thread));
+
+        bool changed = false;
+        if (cooldown > 0)
+            cooldown--;
+
+        const bool queueNearCap =
+            inFlightPacks > (packLimitCur * 90) / 100
+            || inFlightBytes > (byteLimitCur * 90) / 100;
+        const bool hardPressure =
+            writerBacklog > packLimitCur * 3
+            || inFlightPacks > (packLimitCur * 98) / 100
+            || inFlightBytes > (byteLimitCur * 98) / 100;
+        const bool moderatePressure =
+            writerBacklog > packLimitCur * 2
+            || queueNearCap;
+        const bool needMoreFeed =
+            wwRatio > targetWaitInputHigh
+            || (bpRatio > targetBackpressureHigh
+                && !moderatePressure);
+        const bool needLessPressure =
+            hardPressure
+            && wwRatio < 0.01
+            && bpRatio < targetBackpressureLow;
+
+        if (cooldown == 0 && needLessPressure) {
+            int nextPack = (packLimitCur * 90) / 100;
+            long nextBytes = (byteLimitCur * 90) / 100;
+            int rawStep = std::max(1, rawChunksCur / 6);
+            int nextRawChunks = rawChunksCur - rawStep;
+
+            if (nextPack < minPackLimit) nextPack = minPackLimit;
+            if (nextBytes < minByteLimit) nextBytes = minByteLimit;
+            if (nextRawChunks < minRawChunks) nextRawChunks = minRawChunks;
+
+            if (nextPack != packLimitCur || nextBytes != byteLimitCur || nextRawChunks != rawChunksCur) {
+                mAdaptivePackLimit.store(nextPack, std::memory_order_relaxed);
+                mAdaptiveByteLimit.store(nextBytes, std::memory_order_relaxed);
+                mRawChunksInFlightLimit.store(nextRawChunks, std::memory_order_relaxed);
+                changed = true;
+            }
+        } else if (cooldown == 0 && needMoreFeed) {
+            int nextPack = (packLimitCur * 120) / 100;
+            long nextBytes = (byteLimitCur * 120) / 100;
+            int rawStep = std::max(1, rawChunksCur / 5);
+            int nextRawChunks = rawChunksCur + rawStep;
+
+            if (queueNearCap && bpRatio > targetBackpressureHigh && wwRatio < targetWaitInputHigh) {
+                nextPack = (packLimitCur * 125) / 100;
+                nextBytes = (byteLimitCur * 125) / 100;
+            }
+
+            if (nextPack > maxPackLimit) nextPack = maxPackLimit;
+            if (nextBytes > maxByteLimit) nextBytes = maxByteLimit;
+            if (nextRawChunks > maxRawChunks) nextRawChunks = maxRawChunks;
+
+            if (nextPack != packLimitCur || nextBytes != byteLimitCur || nextRawChunks != rawChunksCur) {
+                mAdaptivePackLimit.store(nextPack, std::memory_order_relaxed);
+                mAdaptiveByteLimit.store(nextBytes, std::memory_order_relaxed);
+                mRawChunksInFlightLimit.store(nextRawChunks, std::memory_order_relaxed);
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            cooldown = cooldownTicks;
+            mBackpressureCv.notify_all();
+        }
+    }
+}
+
+void SingleEndProcessor::onPackProduced(int rawBytes) {
+    long packsBefore = mInFlightPacks.load(std::memory_order_relaxed);
+    mFlightBatch.acquireForNextPack(packsBefore);
+
+    if (rawBytes < 0)
+        rawBytes = 0;
+    mInFlightPacks.fetch_add(1, std::memory_order_relaxed);
+    mInFlightBytes.fetch_add(rawBytes, std::memory_order_relaxed);
+
+    const long prev = mAvgPackBytes.load(std::memory_order_relaxed);
+    const long next = (prev * 7 + rawBytes) / 8;
+    if (next > 0)
+        mAvgPackBytes.store(next, std::memory_order_relaxed);
+
+    mBackpressureCv.notify_all();
+}
+
+void SingleEndProcessor::onPackConsumed(int rawBytes) {
+    if (rawBytes < 0)
+        rawBytes = 0;
+    const long p = mInFlightPacks.fetch_sub(1, std::memory_order_relaxed) - 1;
+    if (p < 0)
+        mInFlightPacks.store(0, std::memory_order_relaxed);
+
+    const long b = mInFlightBytes.fetch_sub(rawBytes, std::memory_order_relaxed) - rawBytes;
+    if (b < 0)
+        mInFlightBytes.store(0, std::memory_order_relaxed);
+
+    mFlightBatch.releaseAfterConsume(p);
+    mBackpressureCv.notify_all();
 }
 
 void SingleEndProcessor::initOutput() {
@@ -69,6 +307,7 @@ void SingleEndProcessor::initConfig(ThreadConfig* config) {
 bool SingleEndProcessor::process(){
     if(!mOptions->split.enabled)
         initOutput();
+    startRuntimeAutotune();
 
     mInputLists = new SingleProducerSingleConsumerList<RawPack*>*[mOptions->thread];
 
@@ -105,6 +344,7 @@ bool SingleEndProcessor::process(){
         if(failedWriterThread)
             failedWriterThread->join();
     }
+    stopRuntimeAutotune();
 
     if(mOptions->verbose)
         loginfo("start to generate reports\n");
@@ -298,16 +538,27 @@ bool SingleEndProcessor::processSingleEnd(ReadPack* pack, ThreadConfig* config){
     else
         config->markProcessed(pack->count);
 
+    const int rawBytes = pack->rawBytes;
     delete[] pack->data;
     delete pack;
 
     mPackProcessedCounter++;
+    onPackConsumed(rawBytes);
 
     return true;
 }
 
 ReadPack* SingleEndProcessor::parseRawPack(RawPack* rawPack) {
+    if (rawPack->directReadPack) {
+        ReadPack* pack = rawPack->directPack;
+        if (pack)
+            pack->rawBytes = 0;
+        delete rawPack;
+        return pack;
+    }
+
     int count = rawPack->readCount;
+    int rawBytes = rawPack->length;
     Read** data = new Read*[count];
     char* buf = rawPack->buffer->data + rawPack->offset;
     int len = rawPack->length;
@@ -338,6 +589,16 @@ ReadPack* SingleEndProcessor::parseRawPack(RawPack* rawPack) {
         }
 
         data[i] = new Read(name, seq, strand, qual, phred64);
+
+        if (name->empty() || (*name)[0] != '@') {
+            error_exit("invalid FASTQ record: name line does not start with '@' in " + mOptions->in1);
+        }
+        if (strand->empty() || (*strand)[0] != '+') {
+            error_exit("invalid FASTQ record: strand line does not start with '+' in " + mOptions->in1);
+        }
+        if (seq->length() != qual->length()) {
+            error_exit("invalid FASTQ record: sequence and quality lengths differ in " + mOptions->in1);
+        }
     }
 
     rawPack->buffer->release();
@@ -346,17 +607,51 @@ ReadPack* SingleEndProcessor::parseRawPack(RawPack* rawPack) {
     ReadPack* pack = new ReadPack;
     pack->data = data;
     pack->count = count;
+    pack->rawBytes = rawBytes;
     return pack;
 }
 
 void SingleEndProcessor::readerTask()
 {
+    trace::TaskBreakdown task("se.reader.r1", "se.reader");
     if(mOptions->verbose)
         loginfo("start to load data");
     long lastReported = 0;
     int slept = 0;
     long readNum = 0;
-    FastqReader reader(mOptions->in1, true, mOptions->phred64);
+    std::deque<std::pair<char*, int> > rawQueue;
+    std::mutex rawMu;
+    std::condition_variable rawCvNotEmpty;
+    std::condition_variable rawCvNotFull;
+    bool rawDone = false;
+    std::atomic_bool stopRawProducer(false);
+
+    std::thread rawProducer([&]() {
+        FastqReader reader(mOptions->in1, true, mOptions->phred64, mOptions->thread);
+        while (!stopRawProducer) {
+            int rawLen = 0;
+            char* rawData = reader.readRawBuffer(rawLen);
+            if (!rawData)
+                break;
+            std::unique_lock<std::mutex> lk(rawMu);
+            rawCvNotFull.wait(lk, [&]() {
+                const int rawLimit = mRawChunksInFlightLimit.load(std::memory_order_relaxed);
+                return rawQueue.size() < (size_t)rawLimit || stopRawProducer;
+            });
+            if (stopRawProducer) {
+                lk.unlock();
+                delete[] rawData;
+                break;
+            }
+            rawQueue.push_back(std::make_pair(rawData, rawLen));
+            lk.unlock();
+            rawCvNotEmpty.notify_one();
+        }
+        std::unique_lock<std::mutex> lk(rawMu);
+        rawDone = true;
+        lk.unlock();
+        rawCvNotEmpty.notify_all();
+    });
 
     // leftover from previous buffer (partial record at buffer boundary)
     char* leftover = NULL;
@@ -365,10 +660,23 @@ void SingleEndProcessor::readerTask()
     bool needToBreak = false;
     while(true){
         int rawLen = 0;
-        char* rawData = reader.readRawBuffer(rawLen);
-        if (!rawData) {
-            // no more data from reader; leftover handled after loop
-            break;
+        char* rawData = NULL;
+        {
+            const uint64_t t0 = trace::nowUs();
+            std::unique_lock<std::mutex> lk(rawMu);
+            rawCvNotEmpty.wait(lk, [&]() { return !rawQueue.empty() || rawDone; });
+            const uint64_t t1 = trace::nowUs();
+            task.addGap("wait_raw_chunk", t1 > t0 ? t1 - t0 : 0);
+
+            if (rawQueue.empty() && rawDone)
+                break;
+
+            std::pair<char*, int> item = rawQueue.front();
+            rawQueue.pop_front();
+            rawData = item.first;
+            rawLen = item.second;
+            lk.unlock();
+            rawCvNotFull.notify_one();
         }
 
         // build working buffer: leftover + new raw data
@@ -425,6 +733,7 @@ void SingleEndProcessor::readerTask()
                         buffer->addRef();
                         mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
                         mPackReadCounter++;
+                        onPackProduced(pack->length);
                     }
                     recordsInPack = 0;
                     packStart = lastRecordEnd;
@@ -440,21 +749,38 @@ void SingleEndProcessor::readerTask()
                     buffer->addRef();
                     mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
                     mPackReadCounter++;
+                    onPackProduced(pack->length);
 
                     readNum += recordsInPack;
                     recordsInPack = 0;
                     packStart = lastRecordEnd;
 
                     // backpressure
-                    while (mPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT) {
+                    while (true) {
+                        const int pressure = inputPressureLevel();
+                        if (pressure <= 0)
+                            break;
+                        if (pressure < 2)
+                            break;
+
+                        const uint64_t t0 = trace::nowUs();
                         slept++;
-                        usleep(100);
+                        std::unique_lock<std::mutex> lk(mBackpressureMutex);
+                        mBackpressureCv.wait(lk, [&]() { return inputPressureLevel() < 2; });
+                        const uint64_t t1 = trace::nowUs();
+                        if (t1 > t0)
+                            mBackpressureInputUsWindow.fetch_add((long)(t1 - t0), std::memory_order_relaxed);
+                        task.addGap("queue_full_wait", t1 > t0 ? t1 - t0 : 0);
                     }
                     // writer backpressure
-                    if (readNum % (PACK_SIZE * PACK_IN_MEM_LIMIT) == 0 && mLeftWriter) {
-                        while (mLeftWriter->bufferLength() > PACK_IN_MEM_LIMIT) {
+                    const int packLimit = mAdaptivePackLimit.load(std::memory_order_relaxed);
+                    if (packLimit > 0 && readNum % (PACK_SIZE * packLimit) == 0 && mLeftWriter) {
+                        while (mLeftWriter->bufferLength() > packLimit) {
+                            const uint64_t t0 = trace::nowUs();
                             slept++;
                             usleep(1000);
+                            const uint64_t t1 = trace::nowUs();
+                            task.addGap("backpressure_writer", t1 > t0 ? t1 - t0 : 0);
                         }
                     }
                 }
@@ -471,12 +797,25 @@ void SingleEndProcessor::readerTask()
             buffer->addRef();
             mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
             mPackReadCounter++;
+            onPackProduced(pack->length);
             readNum += recordsInPack;
             packStart = lastRecordEnd;
 
-            while (mPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT) {
+            while (true) {
+                const int pressure = inputPressureLevel();
+                if (pressure <= 0)
+                    break;
+                if (pressure < 2)
+                    break;
+
+                const uint64_t t0 = trace::nowUs();
                 slept++;
-                usleep(100);
+                std::unique_lock<std::mutex> lk(mBackpressureMutex);
+                mBackpressureCv.wait(lk, [&]() { return inputPressureLevel() < 2; });
+                const uint64_t t1 = trace::nowUs();
+                if (t1 > t0)
+                    mBackpressureInputUsWindow.fetch_add((long)(t1 - t0), std::memory_order_relaxed);
+                task.addGap("queue_full_wait", t1 > t0 ? t1 - t0 : 0);
             }
         }
 
@@ -499,6 +838,10 @@ void SingleEndProcessor::readerTask()
         if (needToBreak)
             break;
     }
+
+    stopRawProducer = true;
+    rawCvNotFull.notify_all();
+    rawCvNotEmpty.notify_all();
 
     // Handle final leftover as last pack (incomplete buffer at EOF)
     if (leftoverLen > 0) {
@@ -528,6 +871,7 @@ void SingleEndProcessor::readerTask()
             buf->addRef();
             mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
             mPackReadCounter++;
+            onPackProduced(pack->length);
             buf->release();
         } else {
             delete[] leftover;
@@ -538,15 +882,18 @@ void SingleEndProcessor::readerTask()
 
     for(int t=0; t<mOptions->thread; t++)
         mInputLists[t]->setProducerFinished();
+    mBackpressureCv.notify_all();
 
     mReaderFinished = true;
     if(mOptions->verbose) {
         loginfo("Loading completed with " + to_string(mPackReadCounter) + " packs");
     }
+    rawProducer.join();
 }
 
 void SingleEndProcessor::processorTask(ThreadConfig* config)
 {
+    trace::TaskBreakdown task("se.worker." + to_string(config->getThreadId() + 1), "se.worker");
     SingleProducerSingleConsumerList<RawPack*>* input = config->getLeftInput();
     while(true) {
         if(config->canBeStopped()){
@@ -566,7 +913,17 @@ void SingleEndProcessor::processorTask(ThreadConfig* config)
                 break;
             }
         } else {
-            usleep(100);
+            const uint64_t t0 = trace::nowUs();
+            std::unique_lock<std::mutex> lk(mBackpressureMutex);
+            mBackpressureCv.wait(lk, [&]() {
+                return config->canBeStopped()
+                    || input->canBeConsumed()
+                    || (input->isProducerFinished() && !input->canBeConsumed());
+            });
+            const uint64_t t1 = trace::nowUs();
+            if (t1 > t0)
+                mWorkerWaitInputUsWindow.fetch_add((long)(t1 - t0), std::memory_order_relaxed);
+            task.addGap("wait_input", t1 > t0 ? t1 - t0 : 0);
         }
     }
     input->setConsumerFinished();
@@ -587,6 +944,7 @@ void SingleEndProcessor::processorTask(ThreadConfig* config)
 
 void SingleEndProcessor::writerTask(WriterThread* config)
 {
+    trace::TaskBreakdown task("se.writer." + config->getFilename(), "se.writer");
     while(true) {
         if(config->isCompleted()){
             // last check for possible threading related issue

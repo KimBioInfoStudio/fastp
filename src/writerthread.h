@@ -9,8 +9,10 @@
 #include "options.h"
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include "singleproducersingleconsumerlist.h"
 #include <chrono>
+#include "flight_batch_manager.h"
 
 using namespace std;
 
@@ -45,6 +47,9 @@ private:
     void inputPwrite(int tid, string* data);
     void setInputCompletedPwrite();
     void updateAdaptiveTimeout(int tid, size_t bytes, std::chrono::steady_clock::time_point now);
+    void initCompressionFlightControl();
+    void enqueueCompressedChunk(int tid, string&& compressed);
+    void releaseCompressedChunk(size_t bytes);
 
 private:
     Writer* mWriter1;
@@ -71,6 +76,18 @@ private:
     std::chrono::steady_clock::time_point* mLastFlushTs;
     double* mIngressBpsEma;
     int64_t* mDynamicTimeoutUs;
+
+    // Output wakeup for non-pwrite writer thread
+    std::mutex mOutputMutex;
+    std::condition_variable mOutputCv;
+
+    // Pre-compress queue flight control (auto mode)
+    FlightBatchManager mCompressFlight;
+    std::mutex mCompressFlightMutex;
+    std::condition_variable mCompressFlightCv;
+    std::atomic_long mCompressInFlightBytes;
+    long mCompressInFlightByteLimit;
+    int mCompressInFlightChunkLimit;
 };
 
 #endif

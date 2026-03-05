@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <atomic>
 #include "options.h"
 #include "threadconfig.h"
 #include "filter.h"
@@ -16,6 +17,7 @@
 #include "overlapanalysis.h"
 #include "writerthread.h"
 #include "duplicate.h"
+#include "flight_batch_manager.h"
 
 
 using namespace std;
@@ -40,6 +42,15 @@ private:
     void statInsertSize(Read* r1, Read* r2, OverlapResult& ov, int frontTrimmed1 = 0, int frontTrimmed2 = 0);
     int getPeakInsertSize();
     void writerTask(WriterThread* config);
+    void initAdaptiveBackpressure();
+    void onPackProduced(bool isLeft, int rawBytes);
+    void onPackConsumed(int leftRawBytes, int rightRawBytes);
+    bool shouldThrottleInput(bool isLeft) const;
+    int inputPressureLevel(bool isLeft) const;
+    long effectiveByteLimit() const;
+    void startRuntimeAutotune();
+    void stopRuntimeAutotune();
+    void runtimeAutotuneTask();
 
 private:
     atomic_bool mLeftReaderFinished;
@@ -62,6 +73,22 @@ private:
     size_t mLeftPackReadCounter;
     size_t mRightPackReadCounter;
     atomic_long mPackProcessedCounter;
+    atomic_long mLeftInFlightPacks;
+    atomic_long mRightInFlightPacks;
+    atomic_long mLeftInFlightBytes;
+    atomic_long mRightInFlightBytes;
+    atomic_long mAvgPackBytes;
+    FlightBatchManager mLeftFlightBatch;
+    FlightBatchManager mRightFlightBatch;
+    atomic_int mAdaptivePackLimit;
+    atomic_long mAdaptiveByteLimit;
+    atomic_int mRawChunksInFlightLimit;
+    atomic_long mBackpressureInputUsWindow;
+    atomic_long mWorkerWaitInputUsWindow;
+    atomic_bool mAutoTuneStop;
+    thread* mAutoTuneThread;
+    mutable mutex mBackpressureMutex;
+    condition_variable mBackpressureCv;
     atomic_bool shouldStopReading;
 };
 

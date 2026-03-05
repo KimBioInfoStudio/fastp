@@ -7,8 +7,10 @@ BINDIR ?= $(PREFIX)/bin
 INCLUDE_DIRS ?=
 LIBRARY_DIRS ?=
 
-SRC := $(wildcard ${DIR_SRC}/*.cpp)
-OBJ := $(patsubst %.cpp,${DIR_OBJ}/%.o,$(notdir ${SRC}))
+SRC_CPP := $(wildcard ${DIR_SRC}/*.cpp)
+SRC := $(SRC_CPP)
+OBJ_CPP := $(patsubst %.cpp,${DIR_OBJ}/%.o,$(notdir ${SRC_CPP}))
+OBJ := $(OBJ_CPP)
 
 TARGET := fastp
 
@@ -21,16 +23,16 @@ CXXFLAGS := -std=c++11 -pthread -g -O3 -MD -MP -I. -I${DIR_INC} $(foreach includ
 LIBS := -lisal -ldeflate -lhwy -lpthread
 
 UNAME_S := $(shell uname -s)
-# Link 3rd-party libs statically via .a when available, fallback to dynamic.
-# Avoids -static on AArch64 Linux where ISA-L asm has relocation issues.
+# Require static linkage for non-system third-party libs.
+# Keep only system dynamic libs in final binary.
 FIND_STATIC = $(firstword $(foreach d,$(LIBRARY_DIRS),$(wildcard $(d)/lib$(1).a)) $(wildcard /usr/local/lib/lib$(1).a /opt/homebrew/lib/lib$(1).a))
+REQUIRED_STATIC_LIBS := isal deflate hwy
 STATIC_LIBS :=
-DYNAMIC_LIBS :=
-$(foreach lib,isal deflate hwy,\
+$(foreach lib,$(REQUIRED_STATIC_LIBS),\
   $(if $(call FIND_STATIC,$(lib)),\
     $(eval STATIC_LIBS += $(call FIND_STATIC,$(lib))),\
-    $(eval DYNAMIC_LIBS += -l$(lib))))
-LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(STATIC_LIBS) $(DYNAMIC_LIBS) -lpthread $(LD_FLAGS)
+    $(error missing required static library: lib$(lib).a (set LIBRARY_DIRS or install static lib))))
+LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(STATIC_LIBS) -lpthread $(LD_FLAGS)
 
 
 ${BIN_TARGET}:${OBJ}

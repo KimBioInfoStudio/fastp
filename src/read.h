@@ -67,6 +67,7 @@ public:
 struct ReadPack {
     Read** data;
     int count;
+    int rawBytes;
 };
 
 typedef struct ReadPack ReadPack;
@@ -89,6 +90,15 @@ struct RawPack {
     int offset;
     int length;
     int readCount;
+    bool directReadPack;
+    ReadPack* directPack;
+    RawPack()
+        : buffer(NULL),
+          offset(0),
+          length(0),
+          readCount(0),
+          directReadPack(false),
+          directPack(NULL) {}
 };
 
 #endif

@@ -176,6 +176,14 @@ On macOS with Homebrew, you may need to specify the include and library paths:
 make -j INCLUDE_DIRS=/opt/homebrew/include LIBRARY_DIRS=/opt/homebrew/lib
 ```
 
+Runtime tracing (chrome://trace compatible) can be enabled by CLI or environment variables:
+```shell
+FASTP_TRACE=1 FASTP_TRACE_FILE=fastp.trace.json ./fastp -i in.fq.gz -o out.fq.gz
+# or
+./fastp --trace --trace_file fastp.trace.json -i in.fq.gz -o out.fq.gz
+```
+Then open `fastp.trace.json` in `chrome://trace` to inspect `total / busy / gap.*` timeline events.
+
 # input and output
 `fastp` supports both single-end (SE) and paired-end (PE) input/output.
 * for SE data, you only have to specify read1 input by `-i` or `--in1`, and specify read1 output by `-o` or `--out1`.
@@ -551,5 +559,3 @@ options:
 ### Shifu Chen. 2025. fastp 1.0: An ultra-fast all-round tool for FASTQ data quality control and preprocessing. iMeta 2025: [https://doi.org/10.1002/imt2.107](https://doi.org/10.1002/imt2.70078)
 ### Shifu Chen. 2023. Ultrafast one-pass FASTQ data preprocessing, quality control, and deduplication using fastp. iMeta 2: e107. https://doi.org/10.1002/imt2.107
 ### Shifu Chen, Yanqing Zhou, Yaru Chen, Jia Gu; fastp: an ultra-fast all-in-one FASTQ preprocessor, Bioinformatics, Volume 34, Issue 17, 1 September 2018, Pages i884–i890, https://doi.org/10.1093/bioinformatics/bty560
-
-

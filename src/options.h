@@ -339,6 +339,7 @@ public:
     bool fixMGI;
     // worker thread number
     int thread;
+    // max in-flight flight-batch credits for reader pipeline, 0 for auto
     // trimming options
     TrimmingOptions trim;
     // quality filtering options
