@@ -3,6 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <string.h>
+#include <algorithm>
 #include "fastareader.h"
 
 Options::Options(){
@@ -12,6 +13,10 @@ Options::Options(){
     out2 = "";
     reportTitle = "fastp report";
     thread = 3;
+    threadBudgetTotal = 3;
+    threadReaderCount = 1;
+    threadWriterCount = 0;
+    threadZstdWorkersBudget = 0;
     compression = 4;
     phred64 = false;
     dontOverwrite = false;
@@ -339,6 +344,78 @@ bool Options::validate() {
         if(split.byFileLines) {
             if(split.size < 1000/4)
                 error_exit("you have enabled splitting output by file lines, the file lines (--split_by_lines) should be >= 1000.");
+        }
+    }
+
+    // Treat -w as total pipeline thread budget, then derive worker threads
+    // and zstd extra worker budget automatically.
+    {
+        const int totalBudget = thread;
+        const int readerCount = isPaired() ? (interleavedInput ? 1 : 2) : 1;
+        int writerCount = 0;
+        int zstdWriterCount = 0;
+
+        auto addWriter = [&](const string& path) {
+            if(path.empty())
+                return;
+            writerCount++;
+            if(ends_with(path, ".zst"))
+                zstdWriterCount++;
+        };
+
+        if(!split.enabled) {
+            if(isPaired()) {
+                if(outputToSTDOUT || !out1.empty())
+                    addWriter(outputToSTDOUT ? "/dev/stdout" : out1);
+                if(!out2.empty())
+                    addWriter(out2);
+                if(!unpaired1.empty())
+                    addWriter(unpaired1);
+                if(!unpaired2.empty() && unpaired2 != unpaired1)
+                    addWriter(unpaired2);
+                if(merge.enabled && !merge.out.empty())
+                    addWriter(merge.out);
+                if(!failedOut.empty())
+                    addWriter(failedOut);
+                if(!overlappedOut.empty())
+                    addWriter(overlappedOut);
+            } else {
+                if(outputToSTDOUT || !out1.empty())
+                    addWriter(outputToSTDOUT ? "/dev/stdout" : out1);
+                if(!failedOut.empty())
+                    addWriter(failedOut);
+            }
+        }
+
+        const int autotuneCount = 1;
+        const int reserveCount = 1;
+        const int fixedCount = readerCount + writerCount + autotuneCount + reserveCount;
+        int available = totalBudget - fixedCount;
+        if(available < 1)
+            available = 1;
+
+        int workerThreads = available;
+        int zstdBudget = 0;
+        if(zstdWriterCount > 0) {
+            // keep most flexible budget for pipeline workers, leave remainder to zstd pool
+            workerThreads = std::max(1, (available * 3) / 4);
+            zstdBudget = available - workerThreads;
+            if(zstdBudget < 0)
+                zstdBudget = 0;
+        }
+
+        threadBudgetTotal = totalBudget;
+        threadReaderCount = readerCount;
+        threadWriterCount = writerCount;
+        threadZstdWorkersBudget = zstdBudget;
+        thread = workerThreads;
+
+        if(verbose) {
+            cerr << "Thread budget mode: total=" << threadBudgetTotal
+                 << ", reader=" << threadReaderCount
+                 << ", writer=" << threadWriterCount
+                 << ", worker=" << thread
+                 << ", zstd_extra_budget=" << threadZstdWorkersBudget << endl;
         }
     }
 

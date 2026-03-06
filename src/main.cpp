@@ -145,7 +145,7 @@ int main(int argc, char* argv[]){
     cmd.add<string>("trace_file", 0, "trace output file path (default: fastp.trace.json, or FASTP_TRACE_FILE)", false, "");
 
     // threading
-    cmd.add<int>("thread", 'w', "worker thread number, default is 3", false, 3);
+    cmd.add<int>("thread", 'w', "total pipeline thread budget, default is 3 (auto-split to reader/worker/writer/zstd)", false, 3);
 
     // split the output
     cmd.add<int>("split", 's', "split output by limiting total split file number with this option (2~999), a sequential number prefix will be added to output name ( 0001.out.fq, 0002.out.fq...), disabled by default", false, 0);

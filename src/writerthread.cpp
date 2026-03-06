@@ -8,13 +8,18 @@
 #include <cstring>
 #include <thread>
 #include <algorithm>
+#include <iostream>
+#include <cstdlib>
 
-static const size_t ISAL_BATCH_SIZE = 512 << 10; // 512 KB accumulation threshold
+static const size_t ISAL_BATCH_MIN_SIZE = 256 << 10;      // 256 KB
+static const size_t ISAL_BATCH_DEFAULT_SIZE = 512 << 10;  // 512 KB
+static const size_t ISAL_BATCH_MAX_SIZE = 2 << 20;        // 2 MB
 
 // Adaptive timeout constants for flight batch compression
 static constexpr int64_t ADAPTIVE_MIN_TIMEOUT_US = 2000;   // 2ms floor
 static constexpr int64_t ADAPTIVE_MAX_TIMEOUT_US = 50000;  // 50ms ceiling
 static constexpr double  ADAPTIVE_EMA_ALPHA = 0.2;
+static std::mutex gWriterLogMutex;
 
 static inline string compressGzipOrDie(const string& raw, int level) {
     if (raw.empty()) {
@@ -33,6 +38,7 @@ WriterThread::WriterThread(Options* opt, string filename, bool isSTDOUT){
     mWriter1 = NULL;
 
     mInputCompleted = false;
+    mInputCompletedOnce.store(false, std::memory_order_relaxed);
     mFilename = filename;
     // Auto-detect: use parallel ISA-L gzip when writing to .gz files (not STDOUT)
     mPreCompressed = !isSTDOUT && ends_with(filename, ".gz");
@@ -58,6 +64,31 @@ WriterThread::WriterThread(Options* opt, string filename, bool isSTDOUT){
     mCompressInFlightByteLimit = 0;
     mCompressInFlightChunkLimit = 0;
     initCompressionFlightControl();
+    mFixedBatchMode = false;
+    mFixedBatchSize = ISAL_BATCH_DEFAULT_SIZE;
+    const char* batchKbEnv = getenv("FASTP_ISAL_BATCH_KB");
+    if(batchKbEnv && batchKbEnv[0]) {
+        long kb = atol(batchKbEnv);
+        if(kb > 0) {
+            size_t fixed = (size_t)kb << 10;
+            if(fixed < ISAL_BATCH_MIN_SIZE) fixed = ISAL_BATCH_MIN_SIZE;
+            if(fixed > ISAL_BATCH_MAX_SIZE) fixed = ISAL_BATCH_MAX_SIZE;
+            mFixedBatchMode = true;
+            mFixedBatchSize = fixed;
+        }
+    }
+    mFlushBySizeCount.store(0, std::memory_order_relaxed);
+    mFlushByTimeoutCount.store(0, std::memory_order_relaxed);
+    mFlushByFinalizeCount.store(0, std::memory_order_relaxed);
+    mFlushedRawBytes.store(0, std::memory_order_relaxed);
+    mFlushedCompressedBytes.store(0, std::memory_order_relaxed);
+    mFirstFlushLatencyUs.store(-1, std::memory_order_relaxed);
+    mPwriteWaitCalls.store(0, std::memory_order_relaxed);
+    mPwriteWaitUsTotal.store(0, std::memory_order_relaxed);
+    mPwriteWaitUsMax.store(0, std::memory_order_relaxed);
+    mPwriteBytesTotal.store(0, std::memory_order_relaxed);
+    mPwriteWrites.store(0, std::memory_order_relaxed);
+    mPwriteFirstWriteLatencyUs.store(-1, std::memory_order_relaxed);
 
     if (mPwriteMode) {
         mFd = open(mFilename.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -81,14 +112,17 @@ WriterThread::WriterThread(Options* opt, string filename, bool isSTDOUT){
 
     // Adaptive timeout state (shared by both modes)
     auto now = std::chrono::steady_clock::now();
+    mCreatedTs = now;
     mLastInputTs = new std::chrono::steady_clock::time_point[mOptions->thread];
     mLastFlushTs = new std::chrono::steady_clock::time_point[mOptions->thread];
     mIngressBpsEma = new double[mOptions->thread]();
     mDynamicTimeoutUs = new int64_t[mOptions->thread];
+    mDynamicBatchTarget = new size_t[mOptions->thread];
     for (int t = 0; t < mOptions->thread; t++) {
         mLastInputTs[t] = now;
         mLastFlushTs[t] = now;
         mDynamicTimeoutUs[t] = ADAPTIVE_MAX_TIMEOUT_US;
+        mDynamicBatchTarget[t] = mFixedBatchMode ? mFixedBatchSize : ISAL_BATCH_DEFAULT_SIZE;
     }
 }
 
@@ -103,6 +137,9 @@ bool WriterThread::isCompleted()
 }
 
 bool WriterThread::setInputCompleted() {
+    if (mInputCompletedOnce.exchange(true, std::memory_order_acq_rel))
+        return false;
+
     if (mPwriteMode) {
         setInputCompletedPwrite();
         mInputCompleted = true;
@@ -112,10 +149,33 @@ bool WriterThread::setInputCompleted() {
     if(mPreCompressed) {
         for(int t=0; t<mOptions->thread; t++) {
             if(!mAccumBuf[t].empty()) {
+                const size_t rawBytes = mAccumBuf[t].size();
                 string compressed = compressGzipOrDie(mAccumBuf[t], mIsalLevel);
                 enqueueCompressedChunk(t, std::move(compressed));
+                mFlushByFinalizeCount.fetch_add(1, std::memory_order_relaxed);
+                mFlushedRawBytes.fetch_add((unsigned long long)rawBytes, std::memory_order_relaxed);
                 mAccumBuf[t].clear();
             }
+        }
+        if(mOptions->verbose) {
+            const long bySize = mFlushBySizeCount.load(std::memory_order_relaxed);
+            const long byTimeout = mFlushByTimeoutCount.load(std::memory_order_relaxed);
+            const long byFinalize = mFlushByFinalizeCount.load(std::memory_order_relaxed);
+            const unsigned long long rawTotal = mFlushedRawBytes.load(std::memory_order_relaxed);
+            const unsigned long long gzTotal = mFlushedCompressedBytes.load(std::memory_order_relaxed);
+            const long firstFlushUs = mFirstFlushLatencyUs.load(std::memory_order_relaxed);
+            const long flushCnt = bySize + byTimeout + byFinalize;
+            std::lock_guard<std::mutex> lk(gWriterLogMutex);
+            cerr << "[writer.flight] file=" << mFilename
+                 << " flush.size=" << bySize
+                 << " flush.timeout=" << byTimeout
+                 << " flush.finalize=" << byFinalize
+                 << " avg_raw_batch_kb=" << (flushCnt > 0 ? (rawTotal / flushCnt) / 1024ULL : 0ULL)
+                 << " batch_mode=" << (mFixedBatchMode ? "fixed" : "auto")
+                 << " batch_kb=" << (mFixedBatchMode ? (mFixedBatchSize >> 10) : 0ULL)
+                 << " ratio=" << (rawTotal > 0 ? (double)gzTotal / (double)rawTotal : 0.0)
+                 << " first_flush_ms=" << (firstFlushUs >= 0 ? firstFlushUs / 1000.0 : -1.0)
+                 << endl;
         }
     }
     mInputCompleted = true;
@@ -146,6 +206,25 @@ void WriterThread::setInputCompletedPwrite() {
         mOffsetRing[lastSeq & (OFFSET_RING_SIZE - 1)].cumulative_offset.load(std::memory_order_relaxed) : 0;
 
     ftruncate(mFd, offset);
+
+    if (mOptions->verbose) {
+        const long waitCalls = mPwriteWaitCalls.load(std::memory_order_relaxed);
+        const unsigned long long waitUsTotal = mPwriteWaitUsTotal.load(std::memory_order_relaxed);
+        const long waitUsMax = mPwriteWaitUsMax.load(std::memory_order_relaxed);
+        const unsigned long long bytesTotal = mPwriteBytesTotal.load(std::memory_order_relaxed);
+        const long writes = mPwriteWrites.load(std::memory_order_relaxed);
+        const long firstWriteUs = mPwriteFirstWriteLatencyUs.load(std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(gWriterLogMutex);
+        cerr << "[writer.pwrite] file=" << mFilename
+             << " writes=" << writes
+             << " bytes=" << bytesTotal
+             << " wait_calls=" << waitCalls
+             << " wait_us_total=" << waitUsTotal
+             << " wait_us_avg=" << (waitCalls > 0 ? (waitUsTotal / (unsigned long long)waitCalls) : 0ULL)
+             << " wait_us_max=" << waitUsMax
+             << " first_write_ms=" << (firstWriteUs >= 0 ? firstWriteUs / 1000.0 : -1.0)
+             << endl;
+    }
 }
 
 void WriterThread::output(){
@@ -176,27 +255,43 @@ void WriterThread::input(int tid, string* data) {
     if(mPreCompressed && !data->empty()) {
         auto now = std::chrono::steady_clock::now();
         updateAdaptiveTimeout(tid, data->size(), now);
+        if(!mFixedBatchMode)
+            updateAdaptiveBatchTarget(tid);
+
+        auto flushAccum = [&](long reasonCounter) {
+            const size_t rawBytes = mAccumBuf[tid].size();
+            if (rawBytes == 0)
+                return;
+            string compressed = compressGzipOrDie(mAccumBuf[tid], mIsalLevel);
+            enqueueCompressedChunk(tid, std::move(compressed));
+            mAccumBuf[tid].clear();
+            mLastFlushTs[tid] = now;
+            if(mFirstFlushLatencyUs.load(std::memory_order_relaxed) < 0) {
+                const long us = (long)std::chrono::duration_cast<std::chrono::microseconds>(now - mCreatedTs).count();
+                long expected = -1;
+                mFirstFlushLatencyUs.compare_exchange_strong(expected, us, std::memory_order_relaxed);
+            }
+            if(reasonCounter == 0)
+                mFlushBySizeCount.fetch_add(1, std::memory_order_relaxed);
+            else
+                mFlushByTimeoutCount.fetch_add(1, std::memory_order_relaxed);
+            mFlushedRawBytes.fetch_add((unsigned long long)rawBytes, std::memory_order_relaxed);
+        };
 
         // Adaptive timeout flush (before accumulating new data)
         if (!mAccumBuf[tid].empty()) {
             auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 now - mLastFlushTs[tid]).count();
             if (elapsed_us >= mDynamicTimeoutUs[tid]) {
-                string compressed = compressGzipOrDie(mAccumBuf[tid], mIsalLevel);
-                enqueueCompressedChunk(tid, std::move(compressed));
-                mAccumBuf[tid].clear();
-                mLastFlushTs[tid] = now;
+                flushAccum(1);
             }
         }
 
         // Flight batching: accumulate raw data, compress when >= threshold
         mAccumBuf[tid].append(data->data(), data->length());
         delete data;
-        if(mAccumBuf[tid].size() >= ISAL_BATCH_SIZE) {
-            string compressed = compressGzipOrDie(mAccumBuf[tid], mIsalLevel);
-            enqueueCompressedChunk(tid, std::move(compressed));
-            mAccumBuf[tid].clear();
-            mLastFlushTs[tid] = now;
+        if(mAccumBuf[tid].size() >= mDynamicBatchTarget[tid]) {
+            flushAccum(0);
         }
         return;
     }
@@ -227,6 +322,7 @@ void WriterThread::inputPwrite(int tid, string* data) {
     if (seq > 0) {
         size_t prevSlot = (seq - 1) & (OFFSET_RING_SIZE - 1);
         int spins = 0;
+        auto waitStart = std::chrono::steady_clock::now();
         while (mOffsetRing[prevSlot].published_seq.load(std::memory_order_acquire) != seq - 1) {
             if (++spins <= 32) {
 #if defined(__aarch64__)
@@ -239,6 +335,14 @@ void WriterThread::inputPwrite(int tid, string* data) {
                 spins = 0;
             }
         }
+        auto waitEnd = std::chrono::steady_clock::now();
+        long waitUs = (long)std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart).count();
+        if(waitUs > 0) {
+            mPwriteWaitCalls.fetch_add(1, std::memory_order_relaxed);
+            mPwriteWaitUsTotal.fetch_add((unsigned long long)waitUs, std::memory_order_relaxed);
+            long curMax = mPwriteWaitUsMax.load(std::memory_order_relaxed);
+            while(waitUs > curMax && !mPwriteWaitUsMax.compare_exchange_weak(curMax, waitUs, std::memory_order_relaxed)) {}
+        }
         offset = mOffsetRing[prevSlot].cumulative_offset.load(std::memory_order_relaxed);
     }
 
@@ -246,6 +350,12 @@ void WriterThread::inputPwrite(int tid, string* data) {
     size_t wsize = writeData.size();
     size_t written = 0;
     if (wsize > 0) {
+        if(mPwriteFirstWriteLatencyUs.load(std::memory_order_relaxed) < 0) {
+            const long us = (long)std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - mCreatedTs).count();
+            long expected = -1;
+            mPwriteFirstWriteLatencyUs.compare_exchange_strong(expected, us, std::memory_order_relaxed);
+        }
         while (written < wsize) {
             ssize_t ret = pwrite(mFd, writeData.data() + written, wsize - written, offset + written);
             if (ret < 0) {
@@ -257,6 +367,8 @@ void WriterThread::inputPwrite(int tid, string* data) {
             }
             written += ret;
         }
+        mPwriteBytesTotal.fetch_add((unsigned long long)written, std::memory_order_relaxed);
+        mPwriteWrites.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Publish cumulative offset for next pack
@@ -276,13 +388,37 @@ void WriterThread::updateAdaptiveTimeout(int tid, size_t bytes,
         double instant_bps = static_cast<double>(bytes) / elapsed_us * 1e6;
         mIngressBpsEma[tid] = (1.0 - ADAPTIVE_EMA_ALPHA) * mIngressBpsEma[tid]
                             + ADAPTIVE_EMA_ALPHA * instant_bps;
-        double target_us = static_cast<double>(ISAL_BATCH_SIZE)
+        double target_us = static_cast<double>(mDynamicBatchTarget[tid])
                          / (mIngressBpsEma[tid] > 1.0 ? mIngressBpsEma[tid] : 1.0) * 1e6;
         int64_t clamped = static_cast<int64_t>(target_us);
         if (clamped < ADAPTIVE_MIN_TIMEOUT_US) clamped = ADAPTIVE_MIN_TIMEOUT_US;
         if (clamped > ADAPTIVE_MAX_TIMEOUT_US) clamped = ADAPTIVE_MAX_TIMEOUT_US;
         mDynamicTimeoutUs[tid] = clamped;
     }
+}
+
+void WriterThread::updateAdaptiveBatchTarget(int tid) {
+    size_t target = ISAL_BATCH_DEFAULT_SIZE;
+    double ema = mIngressBpsEma[tid];
+    if (ema >= 300.0 * 1024 * 1024)      target = 2 << 20;
+    else if (ema >= 180.0 * 1024 * 1024) target = 1 << 20;
+    else if (ema >= 90.0  * 1024 * 1024) target = 768 << 10;
+    else if (ema <= 24.0  * 1024 * 1024) target = 256 << 10;
+
+    const long inFlight = mCompressInFlightBytes.load(std::memory_order_relaxed);
+    if (mCompressInFlightByteLimit > 0) {
+        const double fill = (double)inFlight / (double)mCompressInFlightByteLimit;
+        if (fill > 0.80)
+            target = std::max(ISAL_BATCH_MIN_SIZE, target / 2);
+        else if (fill < 0.20 && target < ISAL_BATCH_MAX_SIZE)
+            target = std::min(ISAL_BATCH_MAX_SIZE, target + (256 << 10));
+    }
+
+    size_t prev = mDynamicBatchTarget[tid];
+    size_t smooth = (prev * 3 + target) / 4;
+    if (smooth < ISAL_BATCH_MIN_SIZE) smooth = ISAL_BATCH_MIN_SIZE;
+    if (smooth > ISAL_BATCH_MAX_SIZE) smooth = ISAL_BATCH_MAX_SIZE;
+    mDynamicBatchTarget[tid] = smooth;
 }
 
 void WriterThread::initCompressionFlightControl() {
@@ -327,6 +463,7 @@ void WriterThread::enqueueCompressedChunk(int tid, string&& compressed) {
     }
 
     mCompressFlight.acquireForNextPack(mBufferLength.load(std::memory_order_relaxed));
+    mFlushedCompressedBytes.fetch_add((unsigned long long)bytes, std::memory_order_relaxed);
     mBufferLists[tid]->produce(new string(std::move(compressed)));
     mBufferLength++;
     mOutputCv.notify_one();
@@ -348,6 +485,7 @@ void WriterThread::cleanup() {
     delete[] mLastFlushTs;  mLastFlushTs = NULL;
     delete[] mIngressBpsEma; mIngressBpsEma = NULL;
     delete[] mDynamicTimeoutUs; mDynamicTimeoutUs = NULL;
+    delete[] mDynamicBatchTarget; mDynamicBatchTarget = NULL;
 
     if (mPwriteMode) {
         if (mFd >= 0) {

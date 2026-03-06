@@ -47,6 +47,7 @@ private:
     void inputPwrite(int tid, string* data);
     void setInputCompletedPwrite();
     void updateAdaptiveTimeout(int tid, size_t bytes, std::chrono::steady_clock::time_point now);
+    void updateAdaptiveBatchTarget(int tid);
     void initCompressionFlightControl();
     void enqueueCompressedChunk(int tid, string&& compressed);
     void releaseCompressedChunk(size_t bytes);
@@ -58,6 +59,7 @@ private:
 
     // for spliting output
     bool mInputCompleted;
+    std::atomic_bool mInputCompletedOnce;
     atomic_long mBufferLength;
     SingleProducerSingleConsumerList<string*>** mBufferLists;
     int mWorkingBufferList;
@@ -74,8 +76,26 @@ private:
     // Adaptive timeout for flight batch compression
     std::chrono::steady_clock::time_point* mLastInputTs;
     std::chrono::steady_clock::time_point* mLastFlushTs;
+    std::chrono::steady_clock::time_point mCreatedTs;
     double* mIngressBpsEma;
     int64_t* mDynamicTimeoutUs;
+    size_t* mDynamicBatchTarget;
+    bool mFixedBatchMode;
+    size_t mFixedBatchSize;
+    std::atomic_long mFlushBySizeCount;
+    std::atomic_long mFlushByTimeoutCount;
+    std::atomic_long mFlushByFinalizeCount;
+    std::atomic_ullong mFlushedRawBytes;
+    std::atomic_ullong mFlushedCompressedBytes;
+    std::atomic_long mFirstFlushLatencyUs;
+
+    // pwrite path stats
+    std::atomic_long mPwriteWaitCalls;
+    std::atomic_ullong mPwriteWaitUsTotal;
+    std::atomic_long mPwriteWaitUsMax;
+    std::atomic_ullong mPwriteBytesTotal;
+    std::atomic_long mPwriteWrites;
+    std::atomic_long mPwriteFirstWriteLatencyUs;
 
     // Output wakeup for non-pwrite writer thread
     std::mutex mOutputMutex;

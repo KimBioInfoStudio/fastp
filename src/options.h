@@ -339,6 +339,14 @@ public:
     bool fixMGI;
     // worker thread number
     int thread;
+    // total pipeline thread budget from CLI -w
+    int threadBudgetTotal;
+    // derived reader thread count (informational)
+    int threadReaderCount;
+    // derived writer thread count (informational)
+    int threadWriterCount;
+    // derived extra zstd worker budget (0 means no extra zstd workers)
+    int threadZstdWorkersBudget;
     // max in-flight flight-batch credits for reader pipeline, 0 for auto
     // trimming options
     TrimmingOptions trim;
