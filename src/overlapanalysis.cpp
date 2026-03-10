@@ -184,5 +184,16 @@ bool OverlapAnalysis::test(){
     Read* mergedRead = OverlapAnalysis::merge(&read1, &read2, ov);
     mergedRead->print();
 
-    return ov.overlapped && ov.offset == 10 && ov.overlap_len == 79 && ov.diff == 1;
+    bool basic = ov.overlapped && ov.offset == 10 && ov.overlap_len == 79 && ov.diff == 1;
+
+    string lateMismatchR1 = string(50, 'A') + string(30, 'C');
+    string lateMismatchRcr2 = string(50, 'A') + string(30, 'G');
+    string lateMismatchR2 = Sequence::reverseComplement(&lateMismatchRcr2);
+    OverlapResult lateMismatchOv = OverlapAnalysis::analyze(&lateMismatchR1, &lateMismatchR2, 0, 30, 0.0);
+
+    return basic
+        && lateMismatchOv.overlapped
+        && lateMismatchOv.offset == 0
+        && lateMismatchOv.overlap_len == 80
+        && lateMismatchOv.diff == 30;
 }
