@@ -3,6 +3,11 @@
 
 #define FASTP_VER "1.2.0"
 
+#ifndef GIT_COMMIT
+#define GIT_COMMIT "unknown"
+#endif
+#define FASTP_VER_FULL FASTP_VER " (" GIT_COMMIT ")"
+
 #define _DEBUG false
 
 #ifndef _WIN32

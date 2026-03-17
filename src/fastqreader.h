@@ -31,12 +31,12 @@ SOFTWARE.
 #include "common.h"
 #include <iostream>
 #include <fstream>
-#include <isa-l/igzip_lib.h>
-#include "readpool.h"
+
+class FastqRawReaderBase;
 
 class FastqReader{
 public:
-	FastqReader(string filename, bool hasQuality = true, bool phred64=false);
+	FastqReader(string filename, bool hasQuality = true, bool phred64=false, int workerThreads=0);
 	~FastqReader();
 	bool isZipped();
 
@@ -47,7 +47,9 @@ public:
 	Read* read();
 	bool eof();
 	bool hasNoLineBreakAtEnd();
-	void setReadPool(ReadPool* rp);
+
+	// Zero-copy buffer handoff: swaps internal buffer, returns filled one
+	char* readRawBuffer(int& dataLen);
 
 public:
 	static bool isZipFastq(string filename);
@@ -60,36 +62,27 @@ private:
 	void getLine(string* line);
 	void clearLineBreaks(char* line);
 	void readToBuf();
-	void readToBufIgzip();
 	bool bufferFinished();
 
 private:
 	string mFilename;
-	struct isal_gzip_header mGzipHeader;
-	struct inflate_state mGzipState;
-	unsigned char *mGzipInputBuffer;
-	unsigned char *mGzipOutputBuffer;
-	size_t mGzipInputBufferSize;
-	size_t mGzipOutputBufferSize;
-	size_t mGzipInputUsedBytes;
-	FILE* mFile;
+	FastqRawReaderBase* mRawReader;
 	bool mZipped;
 	char* mFastqBuf;
 	int mBufDataLen;
 	int mBufUsedLen;
-	bool mStdinMode;
 	bool mHasNoLineBreakAtEnd;
 	long mCounter;
 	bool mHasQuality;
 	bool mPhred64;
-    ReadPool* mReadPool;
+	int mWorkerThreads;
 
 };
 
 class FastqReaderPair{
 public:
 	FastqReaderPair(FastqReader* left, FastqReader* right);
-	FastqReaderPair(string leftName, string rightName, bool hasQuality = true, bool phred64 = false, bool interleaved = false);
+	FastqReaderPair(string leftName, string rightName, bool hasQuality = true, bool phred64 = false, bool interleaved = false, int workerThreads = 0);
 	~FastqReaderPair();
 	void read(ReadPair* pair);
 	bool eof();

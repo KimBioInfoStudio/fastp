@@ -6,6 +6,7 @@
 #include <string>
 #include <iostream>
 #include <fstream>
+#include <atomic>
 #include "sequence.h"
 #include <vector>
 
@@ -66,8 +67,38 @@ public:
 struct ReadPack {
     Read** data;
     int count;
+    int rawBytes;
 };
 
 typedef struct ReadPack ReadPack;
+
+struct RawBuffer {
+    char* data;
+    int dataLen;
+    std::atomic<int> refCount;
+    RawBuffer(char* d, int len) : data(d), dataLen(len), refCount(1) {}
+    ~RawBuffer() { delete[] data; }
+    void addRef() { refCount.fetch_add(1, std::memory_order_relaxed); }
+    void release() {
+        if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            delete this;
+    }
+};
+
+struct RawPack {
+    RawBuffer* buffer;
+    int offset;
+    int length;
+    int readCount;
+    bool directReadPack;
+    ReadPack* directPack;
+    RawPack()
+        : buffer(NULL),
+          offset(0),
+          length(0),
+          readCount(0),
+          directReadPack(false),
+          directPack(NULL) {}
+};
 
 #endif

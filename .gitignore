@@ -39,4 +39,4 @@ fastp
 
 # Test Output
 *.json
-*.html
+*.htmlscripts/__pycache__/
