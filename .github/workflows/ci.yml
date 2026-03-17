@@ -24,7 +24,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential nasm
+          sudo apt-get install -y build-essential nasm libzstd-dev
 
       - name: build ISA-L static (Ubuntu)
         if: runner.os == 'Linux'
@@ -49,7 +49,7 @@ jobs:
 
       - name: install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install libdeflate isa-l
+        run: brew install libdeflate isa-l zstd
 
       - name: build Highway
         run: |

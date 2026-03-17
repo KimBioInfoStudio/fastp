@@ -8,6 +8,7 @@
 #include "options.h"
 #include "processor.h"
 #include "evaluator.h"
+#include "trace_profiler.h"
 
 // TODO: code refactoring to remove these global variables
 string command;
@@ -16,7 +17,7 @@ mutex logmtx;
 int main(int argc, char* argv[]){
     // display version info if no argument is given
     if(argc == 1) {
-        cerr << "fastp: an ultra-fast all-in-one FASTQ preprocessor" << endl << "version " << FASTP_VER << endl;
+        cerr << "fastp: an ultra-fast all-in-one FASTQ preprocessor" << endl << "version " << FASTP_VER_FULL << endl;
         //cerr << "fastp --help to see the help"<<endl;
         //return 0;
     }
@@ -26,7 +27,7 @@ int main(int argc, char* argv[]){
         return 0;
     }
     if (argc == 2 && (strcmp(argv[1], "-v")==0 || strcmp(argv[1], "--version")==0)){
-        cout << "fastp " << FASTP_VER << endl;
+        cout << "fastp " << FASTP_VER_FULL << endl;
         return 0;
     }
     cmdline::parser cmd;
@@ -43,7 +44,7 @@ int main(int argc, char* argv[]){
     cmd.add<string>("merged_out", 0, "in the merging mode, specify the file name to store merged output, or specify --stdout to stream the merged output", false, "");
     cmd.add("include_unmerged", 0, "in the merging mode, write the unmerged or unpaired reads to the file specified by --merge. Disabled by default.");
     cmd.add("phred64", '6', "indicate the input is using phred64 scoring (it'll be converted to phred33, so the output will still be phred33)");
-    cmd.add<int>("compression", 'z', "compression level for gzip output (1 ~ 9). 1 is fastest, 9 is smallest, default is 4.", false, 4);
+    cmd.add<int>("compression", 'z', "compression level for compressed output (gzip/zstd, 1 ~ 9). 1 is fastest, 9 is smallest, default is 4.", false, 4);
     cmd.add("stdin", 0, "input from STDIN. If the STDIN is interleaved paired-end FASTQ, please also add --interleaved_in. Adapter auto-detection is disabled for STDIN mode");
     cmd.add("stdout", 0, "stream passing-filters reads to STDOUT. This option will result in interleaved FASTQ output for paired-end output. Disabled by default.");
     cmd.add("interleaved_in", 0, "indicate that <in1> is an interleaved FASTQ which contains both read1 and read2. Disabled by default.");
@@ -140,6 +141,8 @@ int main(int argc, char* argv[]){
     cmd.add<string>("json", 'j', "the json format report file name", false, "fastp.json");
     cmd.add<string>("html", 'h', "the html format report file name", false, "fastp.html");
     cmd.add<string>("report_title", 'R', "should be quoted with \' or \", default is \"fastp report\"", false, "fastp report");
+    cmd.add("trace", 0, "enable chrome://trace output. Can also be enabled by FASTP_TRACE=1");
+    cmd.add<string>("trace_file", 0, "trace output file path (default: fastp.trace.json, or FASTP_TRACE_FILE)", false, "");
 
     // threading
     cmd.add<int>("thread", 'w', "worker thread number, default is 3", false, 3);
@@ -156,6 +159,7 @@ int main(int argc, char* argv[]){
     cmd.add("discard_unmerged", 0, "DEPRECATED, no effect now, see the introduction for merging.");
     
     cmd.parse_check(argc, argv);
+    trace::init(cmd.exist("trace"), cmd.get<string>("trace_file"));
 
     if(argc == 1) {
         cerr << cmd.usage() <<endl;
@@ -513,8 +517,12 @@ int main(int argc, char* argv[]){
 
     cerr << endl << "JSON report: " << opt.jsonFile << endl;
     cerr << "HTML report: " << opt.htmlFile << endl;
+    if(trace::enabled()) {
+        trace::flush();
+        cerr << "Trace report: " << trace::outputPath() << endl;
+    }
     cerr << endl << command << endl;
-    cerr << "fastp v" << FASTP_VER << ", time used: " << (t2)-t1 << " seconds" << endl;
+    cerr << "fastp v" << FASTP_VER_FULL << ", time used: " << (t2)-t1 << " seconds" << endl;
 
     return 0;
 }

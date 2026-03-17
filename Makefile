@@ -15,6 +15,8 @@ ISAL_CFLAGS := $(shell $(PKG_CONFIG) --cflags libisal 2>/dev/null)
 ISAL_LIBS := $(shell $(PKG_CONFIG) --libs-only-L libisal 2>/dev/null)
 DEFLATE_CFLAGS := $(shell $(PKG_CONFIG) --cflags libdeflate 2>/dev/null)
 DEFLATE_LIBS := $(shell $(PKG_CONFIG) --libs-only-L libdeflate 2>/dev/null)
+ZSTD_CFLAGS := $(shell $(PKG_CONFIG) --cflags libzstd 2>/dev/null)
+ZSTD_LIBS := $(shell $(PKG_CONFIG) --libs-only-L libzstd 2>/dev/null)
 
 SRC := $(wildcard ${DIR_SRC}/*.cpp)
 OBJ := $(patsubst %.cpp,${DIR_OBJ}/%.o,$(notdir ${SRC}))
@@ -24,16 +26,16 @@ TARGET := fastp
 BIN_TARGET := ${TARGET}
 
 CXX ?= g++
-CXXFLAGS := -std=c++11 -pthread -g -O3 -MD -MP -I. -I${DIR_INC} $(foreach includedir,$(INCLUDE_DIRS),-I$(includedir)) $(HWY_CFLAGS) $(ISAL_CFLAGS) $(DEFLATE_CFLAGS) ${CXXFLAGS}
+CXXFLAGS := -std=c++11 -pthread -g -O3 -MD -MP -I. -I${DIR_INC} $(foreach includedir,$(INCLUDE_DIRS),-I$(includedir)) $(HWY_CFLAGS) $(ISAL_CFLAGS) $(DEFLATE_CFLAGS) $(ZSTD_CFLAGS) ${CXXFLAGS}
 LIBS := -lisal -ldeflate -lhwy -lpthread
 
-PKG_LDFLAGS := $(HWY_LIBS) $(ISAL_LIBS) $(DEFLATE_LIBS)
+PKG_LDFLAGS := $(HWY_LIBS) $(ISAL_LIBS) $(DEFLATE_LIBS) $(ZSTD_LIBS)
 
 UNAME_S := $(shell uname -s)
 FIND_STATIC = $(firstword $(foreach d,$(LIBRARY_DIRS),$(wildcard $(d)/lib$(1).a)) $(wildcard /usr/local/lib/lib$(1).a /opt/homebrew/lib/lib$(1).a))
 STATIC_LIBS :=
 DYNAMIC_LIBS :=
-$(foreach lib,isal deflate hwy,\
+$(foreach lib,isal deflate hwy zstd,\
   $(if $(call FIND_STATIC,$(lib)),\
     $(eval STATIC_LIBS += $(call FIND_STATIC,$(lib))),\
     $(eval DYNAMIC_LIBS += -l$(lib))))

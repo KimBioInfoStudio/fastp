@@ -3,6 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <string.h>
+#include <algorithm>
 #include "fastareader.h"
 
 Options::Options(){
@@ -12,6 +13,10 @@ Options::Options(){
     out2 = "";
     reportTitle = "fastp report";
     thread = 3;
+    threadBudgetTotal = 3;
+    threadReaderCount = 1;
+    threadWriterCount = 0;
+    threadZstdWorkersBudget = 0;
     compression = 4;
     phred64 = false;
     dontOverwrite = false;
@@ -339,6 +344,66 @@ bool Options::validate() {
         if(split.byFileLines) {
             if(split.size < 1000/4)
                 error_exit("you have enabled splitting output by file lines, the file lines (--split_by_lines) should be >= 1000.");
+        }
+    }
+
+    // -w is the worker thread count (backward-compatible with upstream).
+    // Extra threads for readers, writers, etc. are added on top automatically.
+    {
+        const int workerThreads = thread;  // -w means worker count
+        const int readerCount = isPaired() ? (interleavedInput ? 1 : 2) : 1;
+        int writerCount = 0;
+        int zstdWriterCount = 0;
+
+        auto addWriter = [&](const string& path) {
+            if(path.empty())
+                return;
+            writerCount++;
+            if(ends_with(path, ".zst"))
+                zstdWriterCount++;
+        };
+
+        if(!split.enabled) {
+            if(isPaired()) {
+                if(outputToSTDOUT || !out1.empty())
+                    addWriter(outputToSTDOUT ? "/dev/stdout" : out1);
+                if(!out2.empty())
+                    addWriter(out2);
+                if(!unpaired1.empty())
+                    addWriter(unpaired1);
+                if(!unpaired2.empty() && unpaired2 != unpaired1)
+                    addWriter(unpaired2);
+                if(merge.enabled && !merge.out.empty())
+                    addWriter(merge.out);
+                if(!failedOut.empty())
+                    addWriter(failedOut);
+                if(!overlappedOut.empty())
+                    addWriter(overlappedOut);
+            } else {
+                if(outputToSTDOUT || !out1.empty())
+                    addWriter(outputToSTDOUT ? "/dev/stdout" : out1);
+                if(!failedOut.empty())
+                    addWriter(failedOut);
+            }
+        }
+
+        int zstdBudget = 0;
+        if(zstdWriterCount > 0) {
+            zstdBudget = std::max(1, workerThreads / 4);
+        }
+
+        threadBudgetTotal = workerThreads + readerCount + writerCount;
+        threadReaderCount = readerCount;
+        threadWriterCount = writerCount;
+        threadZstdWorkersBudget = zstdBudget;
+        thread = workerThreads;
+
+        if(verbose) {
+            cerr << "Thread allocation: worker=" << thread
+                 << ", reader=" << threadReaderCount
+                 << ", writer=" << threadWriterCount
+                 << ", zstd_budget=" << threadZstdWorkersBudget
+                 << ", total=" << threadBudgetTotal << endl;
         }
     }
 
