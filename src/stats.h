@@ -49,6 +49,8 @@ public:
     static int base2val(char base);
 
 private:
+    static const int CYCLE_ARRAY_COUNT = 34; // 8+8+8+8+1+1
+    void setCyclePointers(int bufLen);
     void extendBuffer(int newBufLen);
     string makeKmerTD(int i, int j);
     string kmer3(int val);
@@ -70,6 +72,9 @@ private:
     'G' % 8 = 7
     'N' % 8 = 6
     */
+    // Single allocation for all cycle arrays (34 arrays × mBufLen longs)
+    // Layout: [Q30[0..7] | Q20[0..7] | Content[0..7] | Qual[0..7] | TotalBase | TotalQual]
+    long *mCycleBuffer;
     long *mCycleQ30Bases[8];
     long *mCycleQ20Bases[8];
     long *mCycleBaseContents[8];
