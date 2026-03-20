@@ -67,6 +67,8 @@ private:
     ReadPool* mLeftReadPool;
     ReadPool* mRightReadPool;
     atomic_bool shouldStopReading;
+    std::mutex mBackpressureMtx;
+    std::condition_variable mBackpressureCV;
 };
 
 

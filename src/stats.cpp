@@ -931,39 +931,54 @@ Stats* Stats::merge(vector<Stats*>& list) {
     // init overrepresented seq maps
     map<string, long>::iterator iter;
 
+    // merge read number and length sum
     for(int t=0; t<list.size(); t++) {
-        int curCycles =  list[t]->getCycles();
-        // merge read number
         s->mReads += list[t]->mReads;
         s->mLengthSum += list[t]->mLengthSum;
+    }
 
-        // merge per cycle counting for different bases
-        for(int i=0; i<8; i++){
-            for(int j=0; j<cycles && j<curCycles; j++) {
-                s->mCycleQ30Bases[i][j] += list[t]->mCycleQ30Bases[i][j];
-                s->mCycleQ20Bases[i][j] += list[t]->mCycleQ20Bases[i][j];
-                s->mCycleBaseContents[i][j] += list[t]->mCycleBaseContents[i][j];
-                s->mCycleBaseQual[i][j] += list[t]->mCycleBaseQual[i][j];
+    // merge per cycle counting for different bases
+    // Loop reordered to i->j->t for better temporal locality:
+    // keeps destination s->mCycle*[i][j] in register across the inner t loop
+    for(int i=0; i<8; i++){
+        for(int j=0; j<cycles; j++) {
+            for(int t=0; t<list.size(); t++) {
+                if(j < list[t]->getCycles()) {
+                    s->mCycleQ30Bases[i][j] += list[t]->mCycleQ30Bases[i][j];
+                    s->mCycleQ20Bases[i][j] += list[t]->mCycleQ20Bases[i][j];
+                    s->mCycleBaseContents[i][j] += list[t]->mCycleBaseContents[i][j];
+                    s->mCycleBaseQual[i][j] += list[t]->mCycleBaseQual[i][j];
+                }
             }
         }
+    }
 
-        // merge per cycle counting for all bases
-        for(int j=0; j<cycles && j<curCycles; j++) {
-            s->mCycleTotalBase[j] += list[t]->mCycleTotalBase[j];
-            s->mCycleTotalQual[j] += list[t]->mCycleTotalQual[j];
+    // merge per cycle counting for all bases (j->t order)
+    for(int j=0; j<cycles; j++) {
+        for(int t=0; t<list.size(); t++) {
+            if(j < list[t]->getCycles()) {
+                s->mCycleTotalBase[j] += list[t]->mCycleTotalBase[j];
+                s->mCycleTotalQual[j] += list[t]->mCycleTotalQual[j];
+            }
         }
+    }
 
-        // merge kMer
-        for(int i=0; i<s->mKmerBufLen; i++) {
+    // merge kMer (i->t order for destination locality)
+    for(int i=0; i<s->mKmerBufLen; i++) {
+        for(int t=0; t<list.size(); t++) {
             s->mKmer[i] += list[t]->mKmer[i];
         }
+    }
 
-        // merge base/read qual histogram
-        for(int i=0; i<128; i++) {
+    // merge base/read qual histogram (i->t order)
+    for(int i=0; i<128; i++) {
+        for(int t=0; t<list.size(); t++) {
             s->mBaseQualHistogram[i] += list[t]->mBaseQualHistogram[i];
         }
+    }
 
-        // merge over rep seq
+    // merge over rep seq
+    for(int t=0; t<list.size(); t++) {
         for(iter = s->mOverRepSeq.begin(); iter != s->mOverRepSeq.end(); iter++) {
             string seq = iter->first;
             s->mOverRepSeq[seq] += list[t]->mOverRepSeq[seq];
