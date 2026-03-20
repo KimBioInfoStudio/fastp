@@ -12,6 +12,45 @@ namespace HWY_NAMESPACE {
 
 namespace hn = hwy::HWY_NAMESPACE;
 
+// --- Highway version compatibility shims ---
+// SumsOf2: pairwise widen-and-add (u8→u16, u16→u32). Added in Highway 1.1.0.
+#if !defined(HWY_MAJOR) || HWY_MAJOR < 1 || (HWY_MAJOR == 1 && HWY_MINOR < 1)
+template <class V>
+HWY_API hn::VFromD<hn::Repartition<hwy::MakeWide<hn::TFromV<V>>, hn::DFromV<V>>>
+SumsOf2Fallback(V v) {
+    using T = hn::TFromV<V>;
+    using TW = hwy::MakeWide<T>;
+    using D = hn::DFromV<V>;
+    using DW = hn::Repartition<TW, D>;
+    const D d;
+    const DW dw;
+    const size_t N = hn::Lanes(d);
+    HWY_ALIGN T buf[hn::MaxLanes(d)];
+    hn::Store(v, d, buf);
+    HWY_ALIGN TW wbuf[hn::MaxLanes(dw)];
+    for (size_t i = 0; i < N / 2; ++i) {
+        wbuf[i] = static_cast<TW>(buf[2 * i]) + static_cast<TW>(buf[2 * i + 1]);
+    }
+    return hn::Load(dw, wbuf);
+}
+#define SumsOf2 SumsOf2Fallback
+#else
+using hn::SumsOf2;
+#endif
+
+// ReduceSum: horizontal sum of all lanes to scalar. Added in Highway 1.0.5.
+#if !defined(HWY_MAJOR) || (HWY_MAJOR == 0) || \
+    (HWY_MAJOR == 1 && HWY_MINOR == 0 && (!defined(HWY_PATCH) || HWY_PATCH < 5))
+template <class D, class V>
+HWY_API hn::TFromD<D> ReduceSumFallback(D d, V v) {
+    return hn::GetLane(hn::SumOfLanes(d, v));
+}
+#define ReduceSum ReduceSumFallback
+#else
+using hn::ReduceSum;
+#endif
+// --- End compatibility shims ---
+
 void CountQualityMetricsImpl(const char* qualstr, const char* seqstr, int len,
                              char qualThreshold, int& lowQualNum, int& nBaseNum,
                              int& totalQual) {
@@ -57,13 +96,13 @@ void CountQualityMetricsImpl(const char* qualstr, const char* seqstr, int len,
             // Subtract 33 and accumulate quality into u16 accumulator.
             // SumsOf2 adds adjacent u8 pairs -> u16, works on all targets.
             const auto vQualAdj = hn::Sub(vQual, v33);
-            vQualSum16 = hn::Add(vQualSum16, hn::SumsOf2(vQualAdj));
+            vQualSum16 = hn::Add(vQualSum16, SumsOf2(vQualAdj));
         }
 
         // Reduce u16 accumulator to scalar via SumsOf2 -> u32 then ReduceSum
         const hn::ScalableTag<uint32_t> d32;
         qualSum += static_cast<int>(
-            hn::ReduceSum(d32, hn::SumsOf2(vQualSum16)));
+            ReduceSum(d32, SumsOf2(vQualSum16)));
     }
 
     // Scalar tail
