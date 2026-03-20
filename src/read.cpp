@@ -129,12 +129,13 @@ void Read::appendToString(string* target) {
 	target->push_back('\n');
 }
 
-void Read::appendToStringWithTag(string* target, string tag) {
-	size_t size = mName->length() + 1 + tag.length() + mSeq->length() + mStrand->length() + mQuality->length() + 4;
+void Read::appendToStringWithTag(string* target, const char* tag) {
+	size_t tagLen = strlen(tag);
+	size_t size = mName->length() + 1 + tagLen + mSeq->length() + mStrand->length() + mQuality->length() + 4;
 	target->reserve(target->size() + size);
 	target->append(*mName);
 	target->push_back(' ');
-	target->append(tag);
+	target->append(tag, tagLen);
 	target->push_back('\n');
 	target->append(*mSeq);
 	target->push_back('\n');
@@ -144,7 +145,7 @@ void Read::appendToStringWithTag(string* target, string tag) {
 	target->push_back('\n');
 }
 
-string Read::toStringWithTag(string tag) {
+string Read::toStringWithTag(const char* tag) {
 	return *mName + " " + tag + "\n" + *mSeq + "\n" + *mStrand + "\n" + *mQuality + "\n";
 }
 

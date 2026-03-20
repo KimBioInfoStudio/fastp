@@ -112,8 +112,8 @@ Read* Filter::trimAndCut(Read* r, int front, int tail, int& frontTrimmed) {
             if(s > front) {
                 totalQual -= qualstr[s-1];
             }
-            // add 33 for phred33 transforming
-            if((double)totalQual / (double)w >= 33 + mOptions->qualityCut.qualityFront)
+            // add 33 for phred33 transforming (integer multiply instead of FP divide)
+            if(totalQual >= w * (33 + mOptions->qualityCut.qualityFront))
                 break;
         }
 
@@ -147,8 +147,8 @@ Read* Filter::trimAndCut(Read* r, int front, int tail, int& frontTrimmed) {
             if(s > front) {
                 totalQual -= qualstr[s-1];
             }
-            // add 33 for phred33 transforming
-            if((double)totalQual / (double)w < 33 + mOptions->qualityCut.qualityRight) {
+            // add 33 for phred33 transforming (integer multiply instead of FP divide)
+            if(totalQual < w * (33 + mOptions->qualityCut.qualityRight)) {
                 foundLowQualWindow = true;
                 break;
             }
@@ -181,8 +181,8 @@ Read* Filter::trimAndCut(Read* r, int front, int tail, int& frontTrimmed) {
             if(t < l-tail-1) {
                 totalQual -= qualstr[t+1];
             }
-            // add 33 for phred33 transforming
-            if((double)totalQual / (double)w >= 33 + mOptions->qualityCut.qualityTail)
+            // add 33 for phred33 transforming (integer multiply instead of FP divide)
+            if(totalQual >= w * (33 + mOptions->qualityCut.qualityTail))
                 break;
         }
 

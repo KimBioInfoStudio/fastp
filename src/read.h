@@ -25,9 +25,9 @@ public:
     int lowQualCount(int qual=20);
     int length();
     string toString();
-    string toStringWithTag(string tag);
+    string toStringWithTag(const char* tag);
     void appendToString(string* target);
-    void appendToStringWithTag(string* target, string tag);
+    void appendToStringWithTag(string* target, const char* tag);
     void resize(int len);
     void convertPhred64To33();
     void trimFront(int len);

@@ -430,19 +430,31 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
         }
         bool isizeEvaluated = false;
         bool isAdapterDimer = false;
+
+        // Cache overlap result: compute once, reuse for adapter trimming, correction, isize, and merge
+        OverlapResult ov = {};
+        bool ovComputed = false;
+        if(r1 != NULL && r2!=NULL && (mOptions->adapter.enabled || mOptions->correction.enabled || config->getThreadId() == 0 || mOptions->merge.enabled)){
+            ov = OverlapAnalysis::analyze(r1, r2, mOptions->overlapDiffLimit, mOptions->overlapRequire, mOptions->overlapDiffPercentLimit/100.0);
+            ovComputed = true;
+        }
+
         if(r1 != NULL && r2!=NULL && (mOptions->adapter.enabled || mOptions->correction.enabled)){
-            OverlapResult ov = OverlapAnalysis::analyze(r1, r2, mOptions->overlapDiffLimit, mOptions->overlapRequire, mOptions->overlapDiffPercentLimit/100.0, mOptions->adapter.allowGapOverlapTrimming);
-            // we only use thread 0 to evaluae ISIZE
+            // For gap-aware adapter trimming, compute a separate overlap if needed
+            OverlapResult ovForAdapter = mOptions->adapter.allowGapOverlapTrimming
+                ? OverlapAnalysis::analyze(r1, r2, mOptions->overlapDiffLimit, mOptions->overlapRequire, mOptions->overlapDiffPercentLimit/100.0, true)
+                : ov;
+            // we only use thread 0 to evaluate ISIZE
             if(config->getThreadId() == 0) {
                 statInsertSize(r1, r2, ov, frontTrimmed1, frontTrimmed2);
                 isizeEvaluated = true;
             }
-            if(mOptions->correction.enabled && !ov.hasGap) {
+            if(mOptions->correction.enabled && !ovForAdapter.hasGap) {
                 // no gap allowed for overlap correction
-                BaseCorrector::correctByOverlapAnalysis(r1, r2, config->getFilterResult(), ov);
+                BaseCorrector::correctByOverlapAnalysis(r1, r2, config->getFilterResult(), ovForAdapter);
             }
             if(mOptions->adapter.enabled) {
-                bool trimmed = AdapterTrimmer::trimByOverlapAnalysis(r1, r2, config->getFilterResult(), ov, frontTrimmed1, frontTrimmed2);
+                bool trimmed = AdapterTrimmer::trimByOverlapAnalysis(r1, r2, config->getFilterResult(), ovForAdapter, frontTrimmed1, frontTrimmed2);
                 bool trimmed1 = trimmed;
                 bool trimmed2 = trimmed;
                 if(!trimmed){
@@ -467,16 +479,19 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
         }
 
         if(r1 != NULL && r2!=NULL && mOverlappedWriter) {
-            OverlapResult ov = OverlapAnalysis::analyze(r1, r2, mOptions->overlapDiffLimit, mOptions->overlapRequire, 0);
-            if(ov.overlapped) {
-                Read* overlappedRead = new Read(new string(*r1->mName), new string(r1->mSeq->substr(max(0,ov.offset)), ov.overlap_len), new string(*r1->mStrand), new string(r1->mQuality->substr(max(0,ov.offset)), ov.overlap_len));
+            OverlapResult ovForOverlapped = OverlapAnalysis::analyze(r1, r2, mOptions->overlapDiffLimit, mOptions->overlapRequire, 0);
+            if(ovForOverlapped.overlapped) {
+                Read* overlappedRead = new Read(new string(*r1->mName), new string(r1->mSeq->substr(max(0,ovForOverlapped.offset)), ovForOverlapped.overlap_len), new string(*r1->mStrand), new string(r1->mQuality->substr(max(0,ovForOverlapped.offset)), ovForOverlapped.overlap_len));
                 overlappedRead->appendToString(&overlappedOut);
                 recycleToPool1(tid, overlappedRead);
             }
         }
 
         if(config->getThreadId() == 0 && !isizeEvaluated && r1 != NULL && r2!=NULL) {
-            OverlapResult ov = OverlapAnalysis::analyze(r1, r2, mOptions->overlapDiffLimit, mOptions->overlapRequire, mOptions->overlapDiffPercentLimit/100.0);
+            if(!ovComputed) {
+                ov = OverlapAnalysis::analyze(r1, r2, mOptions->overlapDiffLimit, mOptions->overlapRequire, mOptions->overlapDiffPercentLimit/100.0);
+                ovComputed = true;
+            }
             statInsertSize(r1, r2, ov, frontTrimmed1, frontTrimmed2);
             isizeEvaluated = true;
         }
@@ -497,7 +512,10 @@ bool PairEndProcessor::processPairEnd(ReadPack* leftPack, ReadPack* rightPack, T
         // merging mode
         bool mergeProcessed = false;
         if(mOptions->merge.enabled && r1 && r2) {
-            OverlapResult ov = OverlapAnalysis::analyze(r1, r2, mOptions->overlapDiffLimit, mOptions->overlapRequire, mOptions->overlapDiffPercentLimit/100.0);
+            if(!ovComputed) {
+                ov = OverlapAnalysis::analyze(r1, r2, mOptions->overlapDiffLimit, mOptions->overlapRequire, mOptions->overlapDiffPercentLimit/100.0);
+                ovComputed = true;
+            }
             if(ov.overlapped) {
                 merged = OverlapAnalysis::merge(r1, r2, ov);
                 int result = mFilter->passFilter(merged);
