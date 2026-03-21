@@ -102,6 +102,14 @@ WriterThread::WriterThread(Options* opt, string filename, bool isSTDOUT){
         mAccumBuf = new string[mOptions->thread];
         mWorkingBufferList = 0;
         mBufferLength = 0;
+#ifdef __linux__
+        // Runtime io_uring detection: try to create a ring, fall back to sync pwrite
+        mIoUring = new IoUringRaw();
+        if (!mIoUring->setup(256)) {
+            delete mIoUring;
+            mIoUring = NULL;
+        }
+#endif
     } else {
         initWriter(filename, isSTDOUT);
         initBufferLists();
@@ -187,6 +195,9 @@ bool WriterThread::setInputCompleted() {
 }
 
 void WriterThread::setInputCompletedPwrite() {
+#ifdef __linux__
+    flushIoUring();
+#endif
     int W = mOptions->thread;
 
     // Find cumulative offset after the last processed pack
@@ -216,6 +227,9 @@ void WriterThread::setInputCompletedPwrite() {
         const long firstWriteUs = mPwriteFirstWriteLatencyUs.load(std::memory_order_relaxed);
         std::lock_guard<std::mutex> lk(gWriterLogMutex);
         cerr << "[writer.pwrite] file=" << mFilename
+#ifdef __linux__
+             << " io_uring=" << (mIoUring ? "yes" : "no")
+#endif
              << " writes=" << writes
              << " bytes=" << bytesTotal
              << " wait_calls=" << waitCalls
@@ -305,14 +319,9 @@ void WriterThread::inputPwrite(int tid, string* data) {
     string writeData;
 
     if (mPreCompressed) {
-        // Compress each pack individually to maintain correct file ordering.
-        // Cross-pack accumulation is incompatible with interleaved sequence
-        // numbering: worker 0 handles packs 0,3,6,... so batching them would
-        // place pack 0+3 data at pack 3's offset, before packs 1 and 2.
         writeData = compressGzipOrDie(*data, mIsalLevel);
         delete data;
     } else {
-        // .fq: write pack data directly
         writeData = std::move(*data);
         delete data;
     }
@@ -346,9 +355,8 @@ void WriterThread::inputPwrite(int tid, string* data) {
         offset = mOffsetRing[prevSlot].cumulative_offset.load(std::memory_order_relaxed);
     }
 
-    // pwrite data (skip if zero-size passthrough)
     size_t wsize = writeData.size();
-    size_t written = 0;
+
     if (wsize > 0) {
         if(mPwriteFirstWriteLatencyUs.load(std::memory_order_relaxed) < 0) {
             const long us = (long)std::chrono::duration_cast<std::chrono::microseconds>(
@@ -356,28 +364,108 @@ void WriterThread::inputPwrite(int tid, string* data) {
             long expected = -1;
             mPwriteFirstWriteLatencyUs.compare_exchange_strong(expected, us, std::memory_order_relaxed);
         }
-        while (written < wsize) {
-            ssize_t ret = pwrite(mFd, writeData.data() + written, wsize - written, offset + written);
-            if (ret < 0) {
-                if (errno == EINTR) continue;
-                error_exit("pwrite failed: " + string(strerror(errno)));
+
+#ifdef __linux__
+        if (mIoUring) {
+            // Async path: submit to io_uring, publish offset immediately
+            auto* pending = new IoUringPendingWrite{std::move(writeData), offset};
+            {
+                std::lock_guard<std::mutex> lk(mIoUringMutex);
+                drainIoUringCqes();
+
+                mIoUringOutstanding.fetch_add(1, std::memory_order_relaxed);
+
+                int ret = mIoUring->submitWrite(mFd, pending->data.data(), pending->data.size(),
+                                                 offset, (uint64_t)(uintptr_t)pending);
+                if (ret == -EBUSY) {
+                    // SQ full — wait for completions and retry
+                    mIoUring->waitCqe();
+                    drainIoUringCqes();
+                    ret = mIoUring->submitWrite(mFd, pending->data.data(), pending->data.size(),
+                                                 offset, (uint64_t)(uintptr_t)pending);
+                }
+                if (ret < 0) {
+                    mIoUringOutstanding.fetch_sub(1, std::memory_order_relaxed);
+                    inputPwriteSync(tid, NULL, pending->data, offset);
+                    delete pending;
+                    goto publish;
+                }
             }
-            if (ret == 0) {
-                error_exit("pwrite returned 0 (disk full?)");
-            }
-            written += ret;
+            mPwriteBytesTotal.fetch_add((unsigned long long)wsize, std::memory_order_relaxed);
+            mPwriteWrites.fetch_add(1, std::memory_order_relaxed);
+            goto publish;
         }
-        mPwriteBytesTotal.fetch_add((unsigned long long)written, std::memory_order_relaxed);
-        mPwriteWrites.fetch_add(1, std::memory_order_relaxed);
+#endif
+        // Sync pwrite path
+        inputPwriteSync(tid, NULL, writeData, offset);
     }
 
-    // Publish cumulative offset for next pack
+publish:
+    // Publish cumulative offset for next pack.
+    // With io_uring this happens BEFORE I/O completes — the key speedup.
     size_t mySlot = seq & (OFFSET_RING_SIZE - 1);
-    mOffsetRing[mySlot].cumulative_offset.store(offset + written, std::memory_order_relaxed);
+    mOffsetRing[mySlot].cumulative_offset.store(offset + wsize, std::memory_order_relaxed);
     mOffsetRing[mySlot].published_seq.store(seq, std::memory_order_release);
 
     mNextSeq[tid] += mOptions->thread;
 }
+
+void WriterThread::inputPwriteSync(int tid, string* /*unused*/, const string& writeData, size_t offset) {
+    size_t wsize = writeData.size();
+    size_t written = 0;
+    while (written < wsize) {
+        ssize_t ret = pwrite(mFd, writeData.data() + written, wsize - written, offset + written);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            error_exit("pwrite failed: " + string(strerror(errno)));
+        }
+        if (ret == 0) {
+            error_exit("pwrite returned 0 (disk full?)");
+        }
+        written += ret;
+    }
+    mPwriteBytesTotal.fetch_add((unsigned long long)written, std::memory_order_relaxed);
+    mPwriteWrites.fetch_add(1, std::memory_order_relaxed);
+}
+
+#ifdef __linux__
+void WriterThread::drainIoUringCqes() {
+    // Must be called with mIoUringMutex held
+    if (!mIoUring) return;
+    mIoUring->drainCqes([this](const struct fastp_io_uring_cqe* cqe) {
+        auto* pw = (IoUringPendingWrite*)(uintptr_t)cqe->user_data;
+        if (cqe->res < 0) {
+            // Write failed (e.g. ECANCELED) — retry synchronously
+            size_t written = 0;
+            size_t wsize = pw->data.size();
+            while (written < wsize) {
+                ssize_t ret = pwrite(mFd, pw->data.data() + written,
+                                     wsize - written, pw->offset + written);
+                if (ret < 0) {
+                    if (errno == EINTR) continue;
+                    error_exit("pwrite retry failed: " + string(strerror(errno)));
+                }
+                if (ret == 0) error_exit("pwrite returned 0 (disk full?)");
+                written += ret;
+            }
+        }
+        delete pw;
+        mIoUringOutstanding.fetch_sub(1, std::memory_order_relaxed);
+    });
+}
+
+void WriterThread::flushIoUring() {
+    // Wait for all outstanding io_uring writes to complete
+    if (!mIoUring) return;
+    std::lock_guard<std::mutex> lk(mIoUringMutex);
+    while (mIoUringOutstanding.load(std::memory_order_relaxed) > 0) {
+        drainIoUringCqes();
+        if (mIoUringOutstanding.load(std::memory_order_relaxed) > 0) {
+            mIoUring->waitCqe();
+        }
+    }
+}
+#endif
 
 void WriterThread::updateAdaptiveTimeout(int tid, size_t bytes,
                                           std::chrono::steady_clock::time_point now) {
@@ -488,6 +576,13 @@ void WriterThread::cleanup() {
     delete[] mDynamicBatchTarget; mDynamicBatchTarget = NULL;
 
     if (mPwriteMode) {
+#ifdef __linux__
+        if (mIoUring) {
+            flushIoUring();
+            delete mIoUring;
+            mIoUring = NULL;
+        }
+#endif
         if (mFd >= 0) {
             close(mFd);
             mFd = -1;

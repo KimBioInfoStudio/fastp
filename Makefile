@@ -32,7 +32,7 @@ LIBS := -lisal -ldeflate -lhwy -lpthread
 PKG_LDFLAGS := $(HWY_LIBS) $(ISAL_LIBS) $(DEFLATE_LIBS) $(ZSTD_LIBS)
 
 UNAME_S := $(shell uname -s)
-FIND_STATIC = $(firstword $(foreach d,$(LIBRARY_DIRS),$(wildcard $(d)/lib$(1).a)) $(wildcard /usr/local/lib/lib$(1).a /opt/homebrew/lib/lib$(1).a))
+FIND_STATIC = $(firstword $(foreach d,$(LIBRARY_DIRS),$(wildcard $(d)/lib$(1).a)) $(wildcard /usr/local/lib/lib$(1).a /opt/homebrew/lib/lib$(1).a /usr/lib/$(shell uname -m)-linux-gnu/lib$(1).a))
 STATIC_LIBS :=
 DYNAMIC_LIBS :=
 $(foreach lib,isal deflate hwy zstd,\
@@ -40,18 +40,8 @@ $(foreach lib,isal deflate hwy zstd,\
     $(eval STATIC_LIBS += $(call FIND_STATIC,$(lib))),\
     $(eval DYNAMIC_LIBS += -l$(lib))))
 
-ifeq ($(UNAME_S),Linux)
-  ifeq ($(DYNAMIC_LIBS),)
-    # All .a found: fully static binary (default for Linux)
-    LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(PKG_LDFLAGS) -static -Wl,--no-as-needed -pthread $(LIBS) $(LD_FLAGS)
-  else
-    # Some .a missing (e.g. conda): link .a directly + dynamic fallback
-    LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(PKG_LDFLAGS) $(STATIC_LIBS) $(DYNAMIC_LIBS) -lpthread $(LD_FLAGS)
-  endif
-else
-  # macOS: .a preferred, fallback to dynamic
-  LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(PKG_LDFLAGS) $(STATIC_LIBS) $(DYNAMIC_LIBS) -lpthread $(LD_FLAGS)
-endif
+# Link .a directly when found, dynamic fallback otherwise (all platforms)
+LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(PKG_LDFLAGS) $(STATIC_LIBS) $(DYNAMIC_LIBS) -lpthread $(LD_FLAGS)
 
 
 ${BIN_TARGET}:${OBJ}

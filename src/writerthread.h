@@ -13,6 +13,13 @@
 #include "singleproducersingleconsumerlist.h"
 #include <chrono>
 #include "flight_batch_manager.h"
+#ifdef __linux__
+#include "io_uring_raw.h"
+struct IoUringPendingWrite {
+    std::string data;
+    size_t offset;
+};
+#endif
 
 using namespace std;
 
@@ -45,7 +52,13 @@ public:
 private:
     void deleteWriter();
     void inputPwrite(int tid, string* data);
+    void inputPwriteSync(int tid, string* data, const string& writeData, size_t offset);
     void setInputCompletedPwrite();
+#ifdef __linux__
+    void inputIoUring(int tid, string* data);
+    void drainIoUringCqes();
+    void flushIoUring();
+#endif
     void updateAdaptiveTimeout(int tid, size_t bytes, std::chrono::steady_clock::time_point now);
     void updateAdaptiveBatchTarget(int tid);
     void initCompressionFlightControl();
@@ -96,6 +109,13 @@ private:
     std::atomic_ullong mPwriteBytesTotal;
     std::atomic_long mPwriteWrites;
     std::atomic_long mPwriteFirstWriteLatencyUs;
+
+    // io_uring async write (Linux only)
+#ifdef __linux__
+    IoUringRaw* mIoUring;
+    std::mutex mIoUringMutex;
+    std::atomic<int> mIoUringOutstanding{0};
+#endif
 
     // Output wakeup for non-pwrite writer thread
     std::mutex mOutputMutex;
