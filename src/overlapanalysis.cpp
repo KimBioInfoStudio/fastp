@@ -15,9 +15,12 @@ OverlapResult OverlapAnalysis::analyze(Read* r1, Read* r2, int overlapDiffLimit,
 
 // ported from the python code of AfterQC
 OverlapResult OverlapAnalysis::analyze(string*  r1, string*  r2, int diffLimit, int overlapRequire, double diffPercentLimit, bool allowGap) {
-    string rcr2 = Sequence::reverseComplement(r2);
+    // Reuse thread_local buffer to avoid per-call allocation
+    thread_local string rcr2;
+    int len2 = r2->length();
+    rcr2.resize(len2);
+    fastp_simd::reverseComplement(r2->c_str(), &rcr2[0], len2);
     int len1 = r1->length();
-    int len2 = rcr2.length();
     // use the pointer directly for speed
     const char* str1 = r1->c_str();
     const char* str2 = rcr2.c_str();

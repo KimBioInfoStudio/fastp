@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <functional>
 #include <thread>
+#include <chrono>
 #include <memory.h>
 #include "util.h"
 #include "jsonreporter.h"
@@ -315,7 +316,8 @@ bool SingleEndProcessor::processSingleEnd(ReadPack* pack, ThreadConfig* config){
     delete pack->data;
     delete pack;
 
-    mPackProcessedCounter++;
+    mPackProcessedCounter.fetch_add(1, std::memory_order_release);
+    mBackpressureCV.notify_all();
 
     return true;
 }
@@ -343,6 +345,7 @@ void SingleEndProcessor::readerTask()
             pack->count = count;
             mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
             mPackReadCounter++;
+            mBackpressureCV.notify_all();
             data = NULL;
             if(read) {
                 delete read;
@@ -368,22 +371,26 @@ void SingleEndProcessor::readerTask()
             pack->count = count;
             mInputLists[mPackReadCounter % mOptions->thread]->produce(pack);
             mPackReadCounter++;
+            mBackpressureCV.notify_all();
             //re-initialize data for next pack
             data = new Read*[PACK_SIZE];
             memset(data, 0, sizeof(Read*)*PACK_SIZE);
             // if the processor is far behind this reader, sleep and wait to limit memory usage
-            while( mPackReadCounter - mPackProcessedCounter > PACK_IN_MEM_LIMIT){
-                //cerr<<"sleep"<<endl;
-                slept++;
-                usleep(100);
+            {
+                std::unique_lock<std::mutex> lk(mBackpressureMtx);
+                while( mPackReadCounter - mPackProcessedCounter.load(std::memory_order_acquire) > PACK_IN_MEM_LIMIT){
+                    slept++;
+                    mBackpressureCV.wait_for(lk, std::chrono::milliseconds(1));
+                }
             }
             readNum += count;
             // if the writer threads are far behind this reader, sleep and wait
             // check this only when necessary
             if(readNum % (PACK_SIZE * PACK_IN_MEM_LIMIT) == 0 && mLeftWriter) {
+                std::unique_lock<std::mutex> lk(mBackpressureMtx);
                 while(mLeftWriter->bufferLength() > PACK_IN_MEM_LIMIT) {
                     slept++;
-                    usleep(1000);
+                    mBackpressureCV.wait_for(lk, std::chrono::milliseconds(1));
                 }
             }
             // reset count to 0
@@ -409,7 +416,7 @@ void SingleEndProcessor::readerTask()
         mInputLists[t]->setProducerFinished();
 
     //std::unique_lock<std::mutex> lock(mRepo.readCounterMtx);
-    mReaderFinished = true;
+    mReaderFinished.store(true, std::memory_order_release);
     if(mOptions->verbose) {
         loginfo("Loading completed with " + to_string(mPackReadCounter) + " packs");
     }
@@ -440,13 +447,13 @@ void SingleEndProcessor::processorTask(ThreadConfig* config)
                 break;
             }
         } else {
-            usleep(100);
+            std::unique_lock<std::mutex> lk(mBackpressureMtx);
+            mBackpressureCV.wait_for(lk, std::chrono::milliseconds(1));
         }
     }
     input->setConsumerFinished();
 
-    mFinishedThreads++;
-    if(mFinishedThreads == mOptions->thread) {
+    if(mFinishedThreads.fetch_add(1, std::memory_order_release) + 1 == mOptions->thread) {
         if(mLeftWriter)
             mLeftWriter->setInputCompleted();
         if(mFailedWriter)

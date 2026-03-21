@@ -117,34 +117,43 @@ string Read::toString() {
 }
 
 void Read::appendToString(string* target) {
-	size_t size = mName->length() + mSeq->length() + mStrand->length() + mQuality->length() + 4;
-	target->reserve(target->size() + size);
-	target->append(*mName);
-	target->push_back('\n');
-	target->append(*mSeq);
-	target->push_back('\n');
-	target->append(*mStrand);
-	target->push_back('\n');
-	target->append(*mQuality);
-	target->push_back('\n');
+	size_t nameLen = mName->length();
+	size_t seqLen = mSeq->length();
+	size_t strandLen = mStrand->length();
+	size_t qualLen = mQuality->length();
+	size_t totalSize = nameLen + seqLen + strandLen + qualLen + 4;
+
+	size_t oldSize = target->size();
+	target->resize(oldSize + totalSize);
+	char* dst = &(*target)[oldSize];
+
+	memcpy(dst, mName->data(), nameLen); dst += nameLen; *dst++ = '\n';
+	memcpy(dst, mSeq->data(), seqLen); dst += seqLen; *dst++ = '\n';
+	memcpy(dst, mStrand->data(), strandLen); dst += strandLen; *dst++ = '\n';
+	memcpy(dst, mQuality->data(), qualLen); dst += qualLen; *dst++ = '\n';
 }
 
-void Read::appendToStringWithTag(string* target, string tag) {
-	size_t size = mName->length() + 1 + tag.length() + mSeq->length() + mStrand->length() + mQuality->length() + 4;
-	target->reserve(target->size() + size);
-	target->append(*mName);
-	target->push_back(' ');
-	target->append(tag);
-	target->push_back('\n');
-	target->append(*mSeq);
-	target->push_back('\n');
-	target->append(*mStrand);
-	target->push_back('\n');
-	target->append(*mQuality);
-	target->push_back('\n');
+void Read::appendToStringWithTag(string* target, const char* tag) {
+	size_t nameLen = mName->length();
+	size_t tagLen = strlen(tag);
+	size_t seqLen = mSeq->length();
+	size_t strandLen = mStrand->length();
+	size_t qualLen = mQuality->length();
+	size_t totalSize = nameLen + 1 + tagLen + seqLen + strandLen + qualLen + 4;
+
+	size_t oldSize = target->size();
+	target->resize(oldSize + totalSize);
+	char* dst = &(*target)[oldSize];
+
+	memcpy(dst, mName->data(), nameLen); dst += nameLen;
+	*dst++ = ' ';
+	memcpy(dst, tag, tagLen); dst += tagLen; *dst++ = '\n';
+	memcpy(dst, mSeq->data(), seqLen); dst += seqLen; *dst++ = '\n';
+	memcpy(dst, mStrand->data(), strandLen); dst += strandLen; *dst++ = '\n';
+	memcpy(dst, mQuality->data(), qualLen); dst += qualLen; *dst++ = '\n';
 }
 
-string Read::toStringWithTag(string tag) {
+string Read::toStringWithTag(const char* tag) {
 	return *mName + " " + tag + "\n" + *mSeq + "\n" + *mStrand + "\n" + *mQuality + "\n";
 }
 

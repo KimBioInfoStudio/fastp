@@ -35,24 +35,12 @@ Stats::Stats(Options* opt, bool isRead2, int guessedCycles, int bufferMargin){
         mQ20Bases[i] = 0;
         mQ30Bases[i] = 0;
         mBaseContents[i] = 0;
-
-        mCycleQ30Bases[i] = new long[mBufLen];
-        memset(mCycleQ30Bases[i], 0, sizeof(long) * mBufLen);
-
-        mCycleQ20Bases[i] = new long[mBufLen];
-        memset(mCycleQ20Bases[i], 0, sizeof(long) * mBufLen);
-
-        mCycleBaseContents[i] = new long[mBufLen];
-        memset(mCycleBaseContents[i], 0, sizeof(long) * mBufLen);
-
-        mCycleBaseQual[i] = new long[mBufLen];
-        memset(mCycleBaseQual[i], 0, sizeof(long) * mBufLen);
     }
-    mCycleTotalBase = new long[mBufLen];
-    memset(mCycleTotalBase, 0, sizeof(long)*mBufLen);
 
-    mCycleTotalQual = new long[mBufLen];
-    memset(mCycleTotalQual, 0, sizeof(long)*mBufLen);
+    // Single allocation for all 34 cycle arrays
+    mCycleBuffer = new long[(long)CYCLE_ARRAY_COUNT * mBufLen];
+    memset(mCycleBuffer, 0, sizeof(long) * CYCLE_ARRAY_COUNT * mBufLen);
+    setCyclePointers(mBufLen);
 
     mKmerBufLen = 2<<(KMER_LEN * 2);
     mKmer = new long[mKmerBufLen];
@@ -63,69 +51,40 @@ Stats::Stats(Options* opt, bool isRead2, int guessedCycles, int bufferMargin){
     initOverRepSeq();
 }
 
+void Stats::setCyclePointers(int bufLen) {
+    for(int i=0; i<8; i++){
+        mCycleQ30Bases[i]    = mCycleBuffer + (0*8 + i) * (long)bufLen;
+        mCycleQ20Bases[i]    = mCycleBuffer + (1*8 + i) * (long)bufLen;
+        mCycleBaseContents[i]= mCycleBuffer + (2*8 + i) * (long)bufLen;
+        mCycleBaseQual[i]    = mCycleBuffer + (3*8 + i) * (long)bufLen;
+    }
+    mCycleTotalBase = mCycleBuffer + 32 * (long)bufLen;
+    mCycleTotalQual = mCycleBuffer + 33 * (long)bufLen;
+}
+
 void Stats::extendBuffer(int newBufLen){
     if(newBufLen <= mBufLen)
         return ;
 
-    long* newBuf = NULL;
+    long* newBuffer = new long[(long)CYCLE_ARRAY_COUNT * newBufLen];
+    memset(newBuffer, 0, sizeof(long) * CYCLE_ARRAY_COUNT * newBufLen);
 
-    for(int i=0; i<8; i++){
-        newBuf = new long[newBufLen];
-        memset(newBuf, 0, sizeof(long)*newBufLen);
-        memcpy(newBuf, mCycleQ30Bases[i], sizeof(long) * mBufLen);
-        delete mCycleQ30Bases[i];
-        mCycleQ30Bases[i] = newBuf;
-
-        newBuf = new long[newBufLen];
-        memset(newBuf, 0, sizeof(long)*newBufLen);
-        memcpy(newBuf, mCycleQ20Bases[i], sizeof(long) * mBufLen);
-        delete mCycleQ20Bases[i];
-        mCycleQ20Bases[i] = newBuf;
-
-        newBuf = new long[newBufLen];
-        memset(newBuf, 0, sizeof(long)*newBufLen);
-        memcpy(newBuf, mCycleBaseContents[i], sizeof(long) * mBufLen);
-        delete mCycleBaseContents[i];
-        mCycleBaseContents[i] = newBuf;
-
-        newBuf = new long[newBufLen];
-        memset(newBuf, 0, sizeof(long)*newBufLen);
-        memcpy(newBuf, mCycleBaseQual[i], sizeof(long) * mBufLen);
-        delete mCycleBaseQual[i];
-        mCycleBaseQual[i] = newBuf;
+    // Copy each of the 34 old arrays into their new positions
+    for(int a=0; a<CYCLE_ARRAY_COUNT; a++){
+        memcpy(newBuffer + a * (long)newBufLen,
+               mCycleBuffer + a * (long)mBufLen,
+               sizeof(long) * mBufLen);
     }
-    newBuf = new long[newBufLen];
-    memset(newBuf, 0, sizeof(long)*newBufLen);
-    memcpy(newBuf, mCycleTotalBase, sizeof(long)*mBufLen);
-    delete mCycleTotalBase;
-    mCycleTotalBase = newBuf;
 
-    newBuf = new long[newBufLen];
-    memset(newBuf, 0, sizeof(long)*newBufLen);
-    memcpy(newBuf, mCycleTotalQual, sizeof(long)*mBufLen);
-    delete mCycleTotalQual;
-    mCycleTotalQual = newBuf;
-
+    delete[] mCycleBuffer;
+    mCycleBuffer = newBuffer;
+    setCyclePointers(newBufLen);
     mBufLen = newBufLen;
 }
 
 Stats::~Stats() {
-    for(int i=0; i<8; i++){
-        delete mCycleQ30Bases[i];
-        mCycleQ30Bases[i] = NULL;
-
-        delete mCycleQ20Bases[i];
-        mCycleQ20Bases[i] = NULL;
-
-        delete mCycleBaseContents[i];
-        mCycleBaseContents[i] = NULL;
-
-        delete mCycleBaseQual[i];
-        mCycleBaseQual[i] = NULL;
-    }
-
-    delete mCycleTotalBase;
-    delete mCycleTotalQual;
+    delete[] mCycleBuffer;
+    mCycleBuffer = NULL;
 
     // delete memory of curves
     map<string, double*>::iterator iter;
@@ -931,39 +890,54 @@ Stats* Stats::merge(vector<Stats*>& list) {
     // init overrepresented seq maps
     map<string, long>::iterator iter;
 
+    // merge read number and length sum
     for(int t=0; t<list.size(); t++) {
-        int curCycles =  list[t]->getCycles();
-        // merge read number
         s->mReads += list[t]->mReads;
         s->mLengthSum += list[t]->mLengthSum;
+    }
 
-        // merge per cycle counting for different bases
-        for(int i=0; i<8; i++){
-            for(int j=0; j<cycles && j<curCycles; j++) {
-                s->mCycleQ30Bases[i][j] += list[t]->mCycleQ30Bases[i][j];
-                s->mCycleQ20Bases[i][j] += list[t]->mCycleQ20Bases[i][j];
-                s->mCycleBaseContents[i][j] += list[t]->mCycleBaseContents[i][j];
-                s->mCycleBaseQual[i][j] += list[t]->mCycleBaseQual[i][j];
+    // merge per cycle counting for different bases
+    // Loop reordered to i->j->t for better temporal locality:
+    // keeps destination s->mCycle*[i][j] in register across the inner t loop
+    for(int i=0; i<8; i++){
+        for(int j=0; j<cycles; j++) {
+            for(int t=0; t<list.size(); t++) {
+                if(j < list[t]->getCycles()) {
+                    s->mCycleQ30Bases[i][j] += list[t]->mCycleQ30Bases[i][j];
+                    s->mCycleQ20Bases[i][j] += list[t]->mCycleQ20Bases[i][j];
+                    s->mCycleBaseContents[i][j] += list[t]->mCycleBaseContents[i][j];
+                    s->mCycleBaseQual[i][j] += list[t]->mCycleBaseQual[i][j];
+                }
             }
         }
+    }
 
-        // merge per cycle counting for all bases
-        for(int j=0; j<cycles && j<curCycles; j++) {
-            s->mCycleTotalBase[j] += list[t]->mCycleTotalBase[j];
-            s->mCycleTotalQual[j] += list[t]->mCycleTotalQual[j];
+    // merge per cycle counting for all bases (j->t order)
+    for(int j=0; j<cycles; j++) {
+        for(int t=0; t<list.size(); t++) {
+            if(j < list[t]->getCycles()) {
+                s->mCycleTotalBase[j] += list[t]->mCycleTotalBase[j];
+                s->mCycleTotalQual[j] += list[t]->mCycleTotalQual[j];
+            }
         }
+    }
 
-        // merge kMer
-        for(int i=0; i<s->mKmerBufLen; i++) {
+    // merge kMer (i->t order for destination locality)
+    for(int i=0; i<s->mKmerBufLen; i++) {
+        for(int t=0; t<list.size(); t++) {
             s->mKmer[i] += list[t]->mKmer[i];
         }
+    }
 
-        // merge base/read qual histogram
-        for(int i=0; i<128; i++) {
+    // merge base/read qual histogram (i->t order)
+    for(int i=0; i<128; i++) {
+        for(int t=0; t<list.size(); t++) {
             s->mBaseQualHistogram[i] += list[t]->mBaseQualHistogram[i];
         }
+    }
 
-        // merge over rep seq
+    // merge over rep seq
+    for(int t=0; t<list.size(); t++) {
         for(iter = s->mOverRepSeq.begin(); iter != s->mOverRepSeq.end(); iter++) {
             string seq = iter->first;
             s->mOverRepSeq[seq] += list[t]->mOverRepSeq[seq];
