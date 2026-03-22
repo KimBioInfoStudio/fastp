@@ -726,13 +726,22 @@ void PairEndProcessor::readerTask(bool isLeft)
     bool splitSizeReEvaluated = false;
     Read** data = new Read*[PACK_SIZE];
     memset(data, 0, sizeof(Read*)*PACK_SIZE);
+    // BGZF decompress thread budget per reader:
+    // (total CPU cores - worker threads - reader threads - writer threads) / number of gz inputs
+    int cpus = std::thread::hardware_concurrency();
+    int existingThreads = mOptions->thread + 4;  // workers + 2 readers + 2 writers
+    int gzInputs = (ends_with(mOptions->in1, ".gz") ? 1 : 0) + (ends_with(mOptions->in2, ".gz") ? 1 : 0);
+    int bgzfBudget = 0;
+    if (gzInputs > 0)
+        bgzfBudget = std::max(1, ((int)cpus - existingThreads) / gzInputs);
+
     FastqReader* reader = NULL;
     if(isLeft) {
-        reader = new FastqReader(mOptions->in1, true, mOptions->phred64);
+        reader = new FastqReader(mOptions->in1, true, mOptions->phred64, bgzfBudget);
         reader->setReadPool(mLeftReadPool);
     }
     else {
-        reader = new FastqReader(mOptions->in2, true, mOptions->phred64);
+        reader = new FastqReader(mOptions->in2, true, mOptions->phred64, bgzfBudget);
         reader->setReadPool(mRightReadPool);
     }
 
