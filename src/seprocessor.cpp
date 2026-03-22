@@ -332,7 +332,9 @@ void SingleEndProcessor::readerTask()
     bool splitSizeReEvaluated = false;
     Read** data = new Read*[PACK_SIZE];
     memset(data, 0, sizeof(Read*)*PACK_SIZE);
-    FastqReader reader(mOptions->in1, true, mOptions->phred64);
+    int cpus = std::thread::hardware_concurrency();
+    int bgzfBudget = std::max(1, ((int)cpus - mOptions->thread - 3) / 1);  // -workers -reader -writer
+    FastqReader reader(mOptions->in1, true, mOptions->phred64, bgzfBudget);
     reader.setReadPool(mReadPool);
     int count=0;
     bool needToBreak = false;

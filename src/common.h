@@ -25,12 +25,16 @@ typedef unsigned char uint8;
 const char ATCG_BASES[] = {'A', 'T', 'C', 'G'};
 
 // how many reads one pack has
-static const int PACK_SIZE = 256;
+// ~1000 reads × ~350 bytes/read ≈ 350KB, near FASTQ LZ77 saturation (~256KB),
+// so each pack compresses efficiently as a single gzip member.
+static const int PACK_SIZE = 1000;
 
 // if one pack is produced, but not consumed, it will be kept in the memory
 // this number limit the number of in memory packs
 // if the number of in memory packs is full, the producer thread should sleep
-static const int PACK_IN_MEM_LIMIT = 128;
+// Scaled down from 128 to match PACK_SIZE increase (256→1000) and maintain
+// similar peak memory: 32 × 1000 reads ≈ 32K reads in flight ≈ old 128 × 256.
+static const int PACK_IN_MEM_LIMIT = 32;
 
 
 // different filtering results, bigger number means worse

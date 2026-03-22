@@ -24,6 +24,7 @@ SOFTWARE.
 
 #include "fastqreader.h"
 #include "util.h"
+#include "bgzf.h"
 #include <string.h>
 #include <cassert>
 
@@ -31,7 +32,7 @@ SOFTWARE.
 #define IGZIP_IN_BUF_SIZE (1<<22)
 #define GZIP_HEADER_BYTES_REQ (1<<16)
 
-FastqReader::FastqReader(string filename, bool hasQuality, bool phred64){
+FastqReader::FastqReader(string filename, bool hasQuality, bool phred64, int bgzfThreadBudget){
 	mFilename = filename;
 	mZipped = false;
 	mFile = NULL;
@@ -50,10 +51,16 @@ FastqReader::FastqReader(string filename, bool hasQuality, bool phred64){
 	mHasNoLineBreakAtEnd = false;
 	mGzipInputUsedBytes = 0;
 	mReadPool = NULL;
+	mBgzfReader = NULL;
+	mBgzfThreadBudget = bgzfThreadBudget;
 	init();
 }
 
 FastqReader::~FastqReader(){
+	if (mBgzfReader) {
+		delete mBgzfReader;
+		mBgzfReader = NULL;
+	}
 	close();
 	delete[] mFastqBuf;
 	delete[] mGzipInputBuffer;
@@ -69,7 +76,9 @@ void FastqReader::setReadPool(ReadPool* rp) {
 
 
 bool FastqReader::bufferFinished() {
-	if(mZipped) {
+	if(mBgzfReader) {
+		return mBufDataLen == 0;  // BgzfMtReader returns 0 on EOF
+	} else if(mZipped) {
 		return eof() && mGzipState.avail_in == 0;
 	} else {
 		return eof();
@@ -141,7 +150,9 @@ void FastqReader::readToBufIgzip(){
 
 void FastqReader::readToBuf() {
 	mBufDataLen = 0;
-	if(mZipped) {
+	if(mBgzfReader) {
+		mBufDataLen = mBgzfReader->read(mFastqBuf, FQ_BUF_SIZE);
+	} else if(mZipped) {
 		readToBufIgzip();
 	} else {
 		if(!eof())
@@ -161,6 +172,16 @@ void FastqReader::init(){
 		if(mFile == NULL) {
 			error_exit("Failed to open file: " + mFilename);
 		}
+
+		// Check for BGZF format — use parallel decompression if detected
+		if (isBgzf(mFile)) {
+			fseek(mFile, 0, SEEK_SET);
+			mBgzfReader = new BgzfMtReader(mFile, mBgzfThreadBudget);
+			mZipped = true;
+			readToBuf();
+			return;
+		}
+
 		isal_gzip_header_init(&mGzipHeader);
 		isal_inflate_init(&mGzipState);
 		mGzipState.crc_flag = ISAL_GZIP_NO_HDR_VER;
