@@ -34,9 +34,11 @@ SOFTWARE.
 #include <isa-l/igzip_lib.h>
 #include "readpool.h"
 
+class BgzfMtReader;
+
 class FastqReader{
 public:
-	FastqReader(string filename, bool hasQuality = true, bool phred64=false);
+	FastqReader(string filename, bool hasQuality = true, bool phred64=false, int bgzfThreadBudget=0);
 	~FastqReader();
 	bool isZipped();
 
@@ -83,6 +85,8 @@ private:
 	bool mHasQuality;
 	bool mPhred64;
     ReadPool* mReadPool;
+    BgzfMtReader* mBgzfReader;
+    int mBgzfThreadBudget;
 
 };
 

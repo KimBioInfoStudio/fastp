@@ -43,7 +43,6 @@ public:
 private:
     void deleteWriter();
     void inputPwrite(int tid, string* data);
-    void flushPwriteBatch(int tid);
     void setInputCompletedPwrite();
 
 private:
@@ -56,15 +55,14 @@ private:
     SingleProducerSingleConsumerList<string*>** mBufferLists;
     int mWorkingBufferList;
 
-    // pwrite mode: parallel ISA-L gz compression + direct file write
+    // pwrite mode: parallel libdeflate gz compression + direct file write
     bool mPwriteMode;
-    bool mPreCompressed;
-    int mCompressionLevel;
     int mFd;
     OffsetSlot* mOffsetRing;
     size_t* mNextSeq;
-    string* mAccumBuf;
-    libdeflate_compressor** mCompressors;  // per-worker compressor instances
+    libdeflate_compressor** mCompressors;
+    char** mCompBufs;       // per-worker pre-allocated compress output buffers
+    size_t mCompBufSize;
 };
 
 #endif
