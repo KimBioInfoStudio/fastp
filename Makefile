@@ -55,6 +55,13 @@ endif
 ${BIN_TARGET}:${OBJ}
 	$(CXX) $(OBJ) -o $@ $(LD_FLAGS)
 
+# to force fully static linking (Linux only)
+STATIC_FLAGS := -static -Wl,--no-as-needed -pthread
+STATIC_LD_FLAGS := $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir)) $(STATIC_FLAGS) $(LIBS) $(STATIC_LD_FLAGS)
+static:${OBJ}
+	$(CXX) $(OBJ) -o ${BIN_TARGET} $(STATIC_LD_FLAGS)
+.PHONY:static
+
 ${DIR_OBJ}/%.o:${DIR_SRC}/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
