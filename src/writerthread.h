@@ -43,6 +43,7 @@ public:
 private:
     void deleteWriter();
     void inputPwrite(int tid, string* data);
+    void doInputPwrite(int tid, string* data, size_t seq);
     void setInputCompletedPwrite();
 
 private:
@@ -55,8 +56,9 @@ private:
     SingleProducerSingleConsumerList<string*>** mBufferLists;
     int mWorkingBufferList;
 
-    // pwrite mode: parallel libdeflate gz compression + direct file write
+    // pwrite mode: parallel direct file write (with optional gz compression)
     bool mPwriteMode;
+    bool mCompressInPwrite;
     int mFd;
     OffsetSlot* mOffsetRing;
     size_t* mNextSeq;
